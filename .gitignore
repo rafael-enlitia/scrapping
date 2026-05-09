@@ -1,0 +1,14 @@
+venv/
+__pycache__/
+*.pyc
+.env
+data/*.db
+data/*.sqlite
+data/*.pkl
+data/*.html
+data/*.png
+data/gold.jsonl
+.DS_Store
+*.egg-info/
+dist/
+build/

@@ -1,0 +1,3 @@
+{"review_id": "example-001", "sentiment": "negative", "topics": ["bugs", "performance"]}
+{"review_id": "example-002", "sentiment": "positive", "topics": ["features", "ui_ux"]}
+{"review_id": "example-003", "sentiment": "neutral", "topics": ["updates"]}

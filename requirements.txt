@@ -1,0 +1,35 @@
+# Scraping
+google-play-scraper>=1.2.7
+
+# LLM pipeline
+openai>=1.30.0
+pydantic>=2.7.0
+
+# NLP pipeline (BERT + LDA)
+transformers>=4.40.0
+torch>=2.2.0
+nltk>=3.8.0
+joblib>=1.4.0
+
+# Database & config
+sqlalchemy>=2.0.30
+python-dotenv>=1.0.1
+
+# Dashboard
+streamlit>=1.36.0
+plotly>=5.22.0
+pandas>=2.2.0
+wordcloud>=1.9.0
+
+# Evaluation & utilities
+scikit-learn>=1.5.0
+kaleido>=0.2.1
+requests>=2.32.0
+
+# Testing
+pytest>=8.0.0
+pytest-mock>=3.14.0
+
+# Embeddings & clustering
+umap-learn>=0.5.6
+matplotlib>=3.9.0
