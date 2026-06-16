@@ -34,9 +34,10 @@ class TestPersist:
         from src.db.models import Review
 
         raw = [_make_raw_review(i) for i in range(5)]
-        saved = self._run_persist(Session, raw)
+        stats = self._run_persist(Session, raw)
 
-        assert saved == 5
+        assert stats["saved"] == 5
+        assert stats["duplicates"] == 0
         session = Session()
         assert session.query(Review).count() == 5
         session.close()
@@ -48,15 +49,17 @@ class TestPersist:
         first = self._run_persist(Session, raw)
         second = self._run_persist(Session, raw)
 
-        assert first == 3
-        assert second == 0
+        assert first["saved"] == 3
+        assert second["saved"] == 0
+        assert second["duplicates"] == 3
 
     def test_skips_reviews_without_id(self, tmp_db):
         _, Session = tmp_db
 
         raw = [{"reviewId": None, "content": "no id"}]
-        saved = self._run_persist(Session, raw)
-        assert saved == 0
+        stats = self._run_persist(Session, raw)
+        assert stats["saved"] == 0
+        assert stats["no_id"] == 1
 
 
 class TestScrapeReviews:
@@ -90,4 +93,4 @@ class TestScrapeReviews:
                 with patch("src.scraping.play_store.reviews", return_value=(many, None)):
                     result = ps_mod.scrape_reviews("com.example.app", count=10)
 
-        assert len(result) == 10
+        assert len(result.reviews) == 10

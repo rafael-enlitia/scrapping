@@ -3,40 +3,34 @@
 from __future__ import annotations
 
 import os
+import queue
+import re
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
+from typing import Callable
 
 import streamlit as st
 
 _ROOT = Path(__file__).resolve().parent.parent
 _PYTHON = sys.executable
-_ENV = {**os.environ, "PYTHONPATH": str(_ROOT)}
+_ENV = {**os.environ, "PYTHONPATH": str(_ROOT), "PYTHONUNBUFFERED": "1"}
 
-# How often (seconds) the log auto-refreshes while a pipeline is running
-_AUTO_REFRESH_INTERVAL = 3
+# How often (seconds) the page polls for new log output
+_POLL_INTERVAL = 2
 
 
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
 
-def _run(cmd: list[str]) -> tuple[int, str]:
-    """Run a subprocess synchronously and return (exit_code, combined_output)."""
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        cwd=str(_ROOT),
-        env=_ENV,
-    )
-    return result.returncode, ((result.stdout or "") + (result.stderr or "")).strip()
-
-
 def _run_async(cmd: list[str], log_key: str) -> None:
-    """Spawn *cmd* in a background thread; stream output to session_state."""
+    """Spawn *cmd* in a background thread; communicate via a queue to the main thread."""
+    q: queue.Queue = queue.Queue()
+    st.session_state[f"{log_key}_queue"] = q
+
     st.session_state[log_key] = ""
     st.session_state[f"{log_key}_running"] = True
     st.session_state[f"{log_key}_returncode"] = None
@@ -51,15 +45,33 @@ def _run_async(cmd: list[str], log_key: str) -> None:
             cwd=str(_ROOT),
             env=_ENV,
         )
-        st.session_state[f"{log_key}_pid"] = proc.pid
+        q.put(("pid", proc.pid))
         for line in proc.stdout:
-            st.session_state[log_key] += line
+            q.put(("log", line))
         proc.wait()
-        st.session_state[f"{log_key}_running"] = False
-        st.session_state[f"{log_key}_returncode"] = proc.returncode
-        st.session_state[f"{log_key}_pid"] = None
+        q.put(("done", proc.returncode))
 
     threading.Thread(target=_worker, daemon=True).start()
+
+
+def _drain_queue(log_key: str) -> None:
+    """Drain any pending messages from the worker queue into session_state (main thread only)."""
+    q = st.session_state.get(f"{log_key}_queue")
+    if q is None:
+        return
+    while True:
+        try:
+            msg_type, msg_data = q.get_nowait()
+            if msg_type == "pid":
+                st.session_state[f"{log_key}_pid"] = msg_data
+            elif msg_type == "log":
+                st.session_state[log_key] += msg_data
+            elif msg_type == "done":
+                st.session_state[f"{log_key}_running"] = False
+                st.session_state[f"{log_key}_returncode"] = msg_data
+                st.session_state.pop(f"{log_key}_queue", None)
+        except queue.Empty:
+            break
 
 
 def _stop_pipeline(log_key: str) -> None:
@@ -68,34 +80,171 @@ def _stop_pipeline(log_key: str) -> None:
     if pid:
         try:
             os.kill(pid, 15)  # SIGTERM
-            st.session_state[f"{log_key}_running"] = False
             st.session_state[log_key] += "\n[Stopped by user]"
+            st.session_state[f"{log_key}_running"] = False
+            st.session_state.pop(f"{log_key}_queue", None)
         except ProcessLookupError:
-            pass  # already finished
+            pass
 
 
 def _build_cmd(script: str, args: list[str]) -> list[str]:
-    return [_PYTHON, str(_ROOT / "scripts" / script)] + args
+    module = script.removesuffix(".py")
+    return [_PYTHON, "-u", "-m", f"scripts.{module}", *args]
 
 
 def _init_log_state(log_key: str) -> None:
-    """Ensure all session_state keys for a pipeline exist."""
     for suffix, default in [("", ""), ("_running", False), ("_returncode", None), ("_pid", None)]:
         key = f"{log_key}{suffix}"
         if key not in st.session_state:
             st.session_state[key] = default
 
 
-def _render_log(log_key: str) -> None:
-    """Render the running/stopped state + log output for a pipeline."""
+def _parse_progress(log: str) -> tuple[int, int] | None:
+    """Return latest (current, target) from PROGRESS or [n/m] lines in the log."""
+    current, target = 0, 0
+    patterns = [
+        r"PROGRESS (\d+)/(\d+)",
+        r"\[(\d+)/(\d+)\] Classified",
+        r"\[(\d+)/(\d+)\] Failed",
+    ]
+    for line in log.splitlines():
+        for pattern in patterns:
+            match = re.search(pattern, line)
+            if match:
+                current, target = int(match.group(1)), int(match.group(2))
+    return (current, target) if target else None
+
+
+def _parse_found_total(log: str) -> int | None:
+    """Infer batch size from 'Found N …' or 'Computing embeddings for N …' log lines."""
+    patterns = [
+        r"Found (\d+) unclassified reviews",
+        r"Found (\d+) reviews to classify",
+        r"Computing embeddings for (\d+) reviews",
+    ]
+    for line in log.splitlines():
+        for pattern in patterns:
+            match = re.search(pattern, line)
+            if match:
+                return int(match.group(1))
+    return None
+
+
+def _parse_latest_status(log: str) -> str | None:
+    """Return the most recent INFO log message for the progress label."""
+    for line in reversed(log.splitlines()):
+        if "INFO:" in line:
+            return line.split("INFO:", 1)[-1].strip()
+    return None
+
+
+def _parse_scrape_summary(log: str) -> dict[str, int] | None:
+    """Parse SCRAPE_SUMMARY line emitted by scripts/scrape.py."""
+    for line in log.splitlines():
+        if not line.startswith("SCRAPE_SUMMARY"):
+            continue
+        stats: dict[str, int] = {}
+        for part in line.split()[1:]:
+            key, _, val = part.partition("=")
+            if val.isdigit():
+                stats[key] = int(val)
+        return stats if stats else None
+    return None
+
+
+def _format_scrape_summary(stats: dict[str, int]) -> str:
+    saved = stats.get("saved", 0)
+    fetched = stats.get("fetched", 0)
+    parts = [f"**{saved}** new reviews saved"]
+    if stats.get("duplicates"):
+        parts.append(f"**{stats['duplicates']}** already in database (skipped)")
+    if stats.get("skipped_short"):
+        parts.append(f"**{stats['skipped_short']}** too short (skipped)")
+    if stats.get("no_id"):
+        parts.append(f"**{stats['no_id']}** without review ID (skipped)")
+    detail = " · ".join(parts)
+    return f"{detail} — {fetched} eligible from store (requested up to {stats.get('store', fetched)})"
+
+
+def _parse_kv_summary(log: str, prefix: str) -> dict[str, str] | None:
+    """Parse lines like 'CLASSIFY_SUMMARY method=llm classified=42' (last match wins)."""
+    last: dict[str, str] | None = None
+    for line in log.splitlines():
+        if not line.startswith(prefix):
+            continue
+        stats: dict[str, str] = {}
+        for part in line.split()[1:]:
+            key, _, val = part.partition("=")
+            if key:
+                stats[key] = val
+        if stats:
+            last = stats
+    return last
+
+
+def _format_classify_summary(stats: dict[str, str]) -> str:
+    method = stats.get("method", "unknown").upper()
+    count = stats.get("classified", "0")
+    return f"**{count}** reviews classified with **{method}** pipeline"
+
+
+def _format_embed_summary(stats: dict[str, str]) -> str:
+    embedded = stats.get("embedded", stats.get("target", "0"))
+    clusters = stats.get("clusters", "?")
+    return f"**{embedded}** reviews embedded into **{clusters}** clusters"
+
+
+def _pipeline_summary_parser(log: str, kind: str) -> str | None:
+    """Parse completion summary and clear dashboard cache on success."""
+    if kind == "scrape":
+        stats = _parse_scrape_summary(log)
+        if stats:
+            st.cache_data.clear()
+            return _format_scrape_summary(stats)
+    elif kind == "classify":
+        stats = _parse_kv_summary(log, "CLASSIFY_SUMMARY")
+        if stats and "classified" in stats:
+            st.cache_data.clear()
+            return _format_classify_summary(stats)
+    elif kind == "embed":
+        stats = _parse_kv_summary(log, "EMBED_SUMMARY")
+        if stats and "embedded" in stats:
+            st.cache_data.clear()
+            return _format_embed_summary(stats)
+    return None
+
+
+def _render_log(
+    log_key: str,
+    *,
+    progress_target: int | None = None,
+    progress_label: str = "Working",
+    summary_parser: Callable[[str], str | None] | None = None,
+) -> None:
+    """Drain the queue, then render running/stopped state + log output."""
+    _drain_queue(log_key)
+
     is_running = st.session_state[f"{log_key}_running"]
     log = st.session_state[log_key]
     rc = st.session_state.get(f"{log_key}_returncode")
 
     if is_running:
-        col_status, col_stop, col_refresh = st.columns([3, 1, 1])
-        with col_status:
-            st.warning("Pipeline is running in the background…")
+        progress = _parse_progress(log)
+        current, target = (progress if progress else (0, 0))
+        if not target:
+            target = progress_target or _parse_found_total(log) or 0
+
+        status = _parse_latest_status(log)
+        if target > 0:
+            pct = min(current / target, 1.0)
+            label = status or f"{progress_label}… {current}/{target}"
+            st.progress(pct, text=label)
+        elif status:
+            st.progress(0, text=status)
+        else:
+            st.progress(0, text=f"{progress_label}… starting")
+
+        col_stop, col_refresh = st.columns([1, 1])
         with col_stop:
             if st.button("⏹ Stop", key=f"stop_{log_key}"):
                 _stop_pipeline(log_key)
@@ -103,17 +252,22 @@ def _render_log(log_key: str) -> None:
         with col_refresh:
             if st.button("🔄 Refresh", key=f"refresh_{log_key}"):
                 st.rerun()
-        # Auto-refresh while running
-        time.sleep(_AUTO_REFRESH_INTERVAL)
-        st.rerun()
     elif log:
+        summary_msg = summary_parser(log) if summary_parser else None
         if rc is not None and rc != 0:
             st.error(f"Process exited with code {rc}")
         elif rc == 0:
-            st.success("Pipeline completed successfully.")
+            st.success(summary_msg or "Pipeline completed successfully.")
 
     if log:
+        st.subheader("Live log" if is_running else "Log")
         st.code(log, language="text")
+    elif is_running:
+        st.caption("Waiting for output…")
+
+    if is_running:
+        time.sleep(_POLL_INTERVAL)
+        st.rerun()
 
 
 # --------------------------------------------------------------------------
@@ -127,23 +281,34 @@ st.caption("Launch scraping, classification and embedding pipelines without leav
 # ── Shared sidebar inputs ─────────────────────────────────────────────────
 with st.sidebar:
     st.header("App")
-    app_id_input = st.text_input("Package name (App ID)", placeholder="com.example.app")
+
+    from src.db.queries import get_app_ids  # noqa: PLC0415
+    _known_app_ids = get_app_ids()
+    _shared = st.session_state.get("shared_app_id", "")
+    if _known_app_ids:
+        _default_idx = _known_app_ids.index(_shared) if _shared in _known_app_ids else 0
+        app_id_input = st.selectbox("Package name (App ID)", _known_app_ids, index=_default_idx)
+        _custom = st.text_input("Or enter a new App ID", placeholder="com.example.app")
+        if _custom:
+            app_id_input = _custom
+    else:
+        app_id_input = st.text_input("Package name (App ID)", value=_shared, placeholder="com.example.app")
+
+    if not app_id_input:
+        st.warning("Enter an App ID to enable pipeline actions.")
     st.caption("Used by every tab when you run a pipeline.")
 
     st.divider()
     st.subheader("Classify batch size")
     st.caption(
         "Only **LLM Classify** and **NLP Classify** read this value. "
-        "**Scrape** ignores it — set how many reviews to download in that tab. "
-        "**Embeddings** has its own limit on that tab. "
-        "**0** = process every pending review in one run."
+        "**0** = process every pending review."
     )
     limit_input = st.number_input(
         "Max reviews per classify run",
         min_value=0,
         value=0,
         step=50,
-        help="Caps LLM/NLP classification only. Not used for scraping or embedding.",
     )
     limit_val = int(limit_input) if limit_input else None
 
@@ -158,10 +323,9 @@ tab_scrape, tab_llm, tab_nlp, tab_embed = st.tabs(
 # ══════════════════════════════════════════════════════════════════════════
 with tab_scrape:
     st.subheader("Scrape Google Play Reviews")
-    st.info(
-        "How many reviews to **download** from the store is set below (**Number of reviews to fetch**). "
-        "The sidebar **Max reviews per classify run** does **not** apply here."
-    )
+
+    _scrape_log_key = "scrape_log"
+    _init_log_state(_scrape_log_key)
 
     col1, col2 = st.columns(2)
     with col1:
@@ -173,21 +337,28 @@ with tab_scrape:
 
     if not app_id_input:
         st.info("Enter an App ID in the sidebar to enable scraping.")
-    elif st.button("▶ Start Scraping", type="primary"):
-        args = [
-            "--app-id", app_id_input,
-            "--count", str(scrape_count),
-            "--lang", scrape_lang,
-            "--country", scrape_country,
-            "--sort", scrape_sort,
-        ]
-        with st.spinner("Scraping — this may take a moment…"):
-            code, out = _run(_build_cmd("scrape.py", args))
-        if code == 0:
-            st.success(out or "Scraping completed.")
-        else:
-            st.error(f"Scraping failed (exit {code})")
-            st.code(out, language="text")
+    elif not st.session_state[f"{_scrape_log_key}_running"]:
+        if st.button("▶ Start Scraping", type="primary", disabled=not app_id_input):
+            args = [
+                "--app-id", app_id_input,
+                "--count", str(scrape_count),
+                "--lang", scrape_lang,
+                "--country", scrape_country,
+                "--sort", scrape_sort,
+            ]
+            st.session_state["scrape_target"] = int(scrape_count)
+            _run_async(_build_cmd("scrape.py", args), _scrape_log_key)
+            st.rerun()
+
+    def _scrape_summary(log: str) -> str | None:
+        return _pipeline_summary_parser(log, "scrape")
+
+    _render_log(
+        _scrape_log_key,
+        progress_target=int(st.session_state.get("scrape_target", scrape_count)),
+        progress_label="Fetching reviews",
+        summary_parser=_scrape_summary,
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -201,7 +372,7 @@ with tab_llm:
 
     col1, col2 = st.columns(2)
     with col1:
-        llm_provider = st.selectbox("Provider", ["(env default)", "openai", "ollama"])
+        llm_provider = st.selectbox("Provider", ["(env default)", "openai", "ollama", "iaedu"])
         llm_retry = st.checkbox("Retry failed reviews only (--retry-failed)")
     with col2:
         st.markdown("**Batch size:** sidebar → *Max reviews per classify run*")
@@ -211,7 +382,7 @@ with tab_llm:
             st.caption("**0** in sidebar → classify **all** unclassified reviews.")
 
     if not st.session_state[f"{_llm_log_key}_running"]:
-        if st.button("▶ Start LLM Classification", type="primary"):
+        if st.button("▶ Start LLM Classification", type="primary", disabled=not app_id_input):
             args = []
             if app_id_input:
                 args += ["--app-id", app_id_input]
@@ -224,7 +395,12 @@ with tab_llm:
             _run_async(_build_cmd("classify.py", args), _llm_log_key)
             st.rerun()
 
-    _render_log(_llm_log_key)
+    _render_log(
+        _llm_log_key,
+        progress_target=limit_val,
+        progress_label="LLM classification",
+        summary_parser=lambda log: _pipeline_summary_parser(log, "classify"),
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -242,14 +418,11 @@ with tab_nlp:
         nlp_lang = st.text_input("Language (stopwords)", value="portuguese")
     with col2:
         nlp_retrain = st.checkbox("Force retrain LDA model")
-        st.markdown("**Batch size:** sidebar → *Max reviews per classify run*")
         if limit_val:
             st.caption(f"This run will classify at most **{limit_val}** reviews.")
-        else:
-            st.caption("**0** in sidebar → classify **all** unclassified reviews.")
 
     if not st.session_state[f"{_nlp_log_key}_running"]:
-        if st.button("▶ Start NLP Classification", type="primary"):
+        if st.button("▶ Start NLP Classification", type="primary", disabled=not app_id_input):
             args = ["--num-topics", str(nlp_topics), "--language", nlp_lang]
             if app_id_input:
                 args += ["--app-id", app_id_input]
@@ -260,7 +433,12 @@ with tab_nlp:
             _run_async(_build_cmd("classify_nlp.py", args), _nlp_log_key)
             st.rerun()
 
-    _render_log(_nlp_log_key)
+    _render_log(
+        _nlp_log_key,
+        progress_target=limit_val,
+        progress_label="NLP classification",
+        summary_parser=lambda log: _pipeline_summary_parser(log, "classify"),
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -273,10 +451,6 @@ with tab_embed:
         "then groups reviews into clusters with KMeans. "
         "Hover over any point to read the review text."
     )
-    st.info(
-        "The sidebar **Max reviews per classify run** is for LLM/NLP only. "
-        "This tab uses **Max reviews to embed** below."
-    )
 
     _emb_log_key = "emb_log"
     _init_log_state(_emb_log_key)
@@ -286,52 +460,60 @@ with tab_embed:
         embed_clusters = st.number_input("Number of clusters (KMeans)", min_value=2, max_value=30, value=8)
     with col2:
         embed_limit = st.number_input(
-            "Max reviews to embed (0 = all in DB / app filter)",
+            "Max reviews to embed (0 = all)",
             min_value=0,
             value=0,
             step=100,
-            help="Separate from the sidebar classify batch size.",
         )
 
     if not st.session_state[f"{_emb_log_key}_running"]:
-        if st.button("▶ Compute Embeddings", type="primary"):
+        if st.button("▶ Compute Embeddings", type="primary", disabled=not app_id_input):
             args = ["--n-clusters", str(embed_clusters)]
             if app_id_input:
                 args += ["--app-id", app_id_input]
             if embed_limit:
                 args += ["--limit", str(embed_limit)]
+            st.session_state["embed_target"] = int(embed_limit) if embed_limit else None
             _run_async(_build_cmd("embed.py", args), _emb_log_key)
             st.rerun()
 
-    _render_log(_emb_log_key)
+    _embed_target = st.session_state.get("embed_target")
+    if _embed_target is None:
+        _embed_target = int(embed_limit) if embed_limit else None
+
+    _render_log(
+        _emb_log_key,
+        progress_target=_embed_target,
+        progress_label="Embeddings pipeline",
+        summary_parser=lambda log: _pipeline_summary_parser(log, "embed"),
+    )
 
     # ── Cluster visualisation ──────────────────────────────────────────────
-    from src.nlp.embeddings import load_embeddings
-    from src.db.models import Review, get_session, init_db
+    from src.db.queries import get_embedding_clusters  # noqa: PLC0415
+    from src.db.models import Review, get_session, init_db  # noqa: PLC0415
 
-    emb = load_embeddings()
-    if emb is not None:
-        import pandas as pd
-        import plotly.express as px
+    import pandas as pd  # noqa: PLC0415
+    import plotly.express as px  # noqa: PLC0415
 
+    _embed_app = app_id_input or None
+    cluster_df = get_embedding_clusters(_embed_app)
+
+    if cluster_df is not None and not cluster_df.empty:
         st.divider()
         st.subheader("Cluster visualisation (UMAP 2-D)")
+        if _embed_app:
+            st.caption(f"Showing embeddings for: **{_embed_app}**")
 
-        # Load review content to enrich hover labels
+        # Enrich with review content for hover labels
         init_db()
-        session = get_session()
-        rows = session.query(Review.review_id, Review.content, Review.score, Review.app_version).all()
-        session.close()
-        content_map = {r.review_id: r for r in rows}
+        _session = get_session()
+        try:
+            _rows = _session.query(Review.review_id, Review.content, Review.score, Review.app_version).all()
+        finally:
+            _session.close()
+        content_map = {r.review_id: r for r in _rows}
 
-        plot_df = pd.DataFrame({
-            "x": emb.umap_2d[:, 0],
-            "y": emb.umap_2d[:, 1],
-            "cluster": emb.cluster_labels.astype(str),
-            "review_id": emb.review_ids,
-        })
-
-        # Enrich with content for hover (truncated to 120 chars)
+        plot_df = cluster_df.copy()
         plot_df["preview"] = plot_df["review_id"].map(
             lambda rid: (content_map[rid].content[:120] + "…") if rid in content_map else ""
         )
@@ -365,4 +547,8 @@ with tab_embed:
         counts.columns = ["Cluster", "Reviews"]
         st.dataframe(counts.sort_values("Cluster"), width="stretch", hide_index=True)
     else:
-        st.info("No embeddings computed yet. Run the pipeline above to generate them.")
+        st.info(
+            "No embeddings computed yet for "
+            + (f"**{_embed_app}**" if _embed_app else "this app")
+            + ". Run the pipeline above to generate them."
+        )

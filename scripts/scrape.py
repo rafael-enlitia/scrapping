@@ -29,14 +29,14 @@ def main():
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-    results = scrape_reviews(
+    result = scrape_reviews(
         app_id=args.app_id,
         lang=args.lang,
         country=args.country,
         count=args.count,
         sort=SORT_OPTIONS[args.sort],
     )
-    print(f"Done — {len(results)} reviews fetched.")
+    print(result.summary_line())
 
 
 if __name__ == "__main__":

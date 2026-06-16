@@ -29,7 +29,7 @@ class TestGetReviewsDf:
 
         from src.db.queries import get_reviews_df
 
-        df = get_reviews_df.__wrapped__("com.example.app", method="llm")
+        df = get_reviews_df("com.example.app", method="llm")
         assert isinstance(df, pd.DataFrame)
 
     def test_all_reviews_returned(self, db_with_reviews, monkeypatch):
@@ -38,7 +38,7 @@ class TestGetReviewsDf:
 
         from src.db.queries import get_reviews_df
 
-        df = get_reviews_df.__wrapped__("com.example.app", method="llm")
+        df = get_reviews_df("com.example.app", method="llm")
         assert len(df) == 20
 
     def test_no_duplicate_reviews_in_both_mode(self, db_with_classifications, monkeypatch):
@@ -47,7 +47,7 @@ class TestGetReviewsDf:
 
         from src.db.queries import get_reviews_df
 
-        df = get_reviews_df.__wrapped__("com.example.app", method=None)
+        df = get_reviews_df("com.example.app", method=None)
         assert df["review_id"].nunique() == len(df), "Duplicate rows detected in 'both' mode"
 
     def test_both_mode_has_topics_column(self, db_with_classifications, monkeypatch):
@@ -56,7 +56,7 @@ class TestGetReviewsDf:
 
         from src.db.queries import get_reviews_df
 
-        df = get_reviews_df.__wrapped__("com.example.app", method=None)
+        df = get_reviews_df("com.example.app", method=None)
         assert "topics" in df.columns
         assert "topics_llm" not in df.columns
         assert "topics_nlp" not in df.columns
@@ -67,7 +67,7 @@ class TestGetReviewsDf:
 
         from src.db.queries import get_reviews_df
 
-        df = get_reviews_df.__wrapped__("com.other.app", method="llm")
+        df = get_reviews_df("com.other.app", method="llm")
         assert len(df) == 0
 
     def test_returns_all_when_no_app_id(self, db_with_reviews, monkeypatch):
@@ -76,7 +76,7 @@ class TestGetReviewsDf:
 
         from src.db.queries import get_reviews_df
 
-        df = get_reviews_df.__wrapped__(None, method="llm")
+        df = get_reviews_df(None, method="llm")
         assert len(df) == 20
 
 
@@ -87,7 +87,7 @@ class TestGetVersions:
 
         from src.db.queries import get_versions
 
-        versions = get_versions.__wrapped__("com.example.app")
+        versions = get_versions("com.example.app")
         assert isinstance(versions, list)
         # Should be sorted newest first
         if len(versions) >= 2:
@@ -103,7 +103,7 @@ class TestSentimentByVersion:
 
         from src.db.queries import sentiment_by_version
 
-        df = sentiment_by_version.__wrapped__("com.example.app", method="llm")
+        df = sentiment_by_version("com.example.app", method="llm")
         assert isinstance(df, pd.DataFrame)
         assert "sentiment" in df.columns
         assert "count" in df.columns
@@ -114,7 +114,7 @@ class TestSentimentByVersion:
 
         from src.db.queries import sentiment_by_version
 
-        df = sentiment_by_version.__wrapped__("com.example.app", method=None)
+        df = sentiment_by_version("com.example.app", method=None)
         assert isinstance(df, pd.DataFrame)
 
 
@@ -125,7 +125,7 @@ class TestAgreementRate:
 
         from src.db.queries import agreement_rate
 
-        result = agreement_rate.__wrapped__("com.example.app")
+        result = agreement_rate("com.example.app")
         assert "total" in result
         assert "agreed" in result
         assert "rate" in result
@@ -136,7 +136,7 @@ class TestAgreementRate:
 
         from src.db.queries import agreement_rate
 
-        result = agreement_rate.__wrapped__("com.example.app")
+        result = agreement_rate("com.example.app")
         assert 0.0 <= result["rate"] <= 100.0
 
     def test_empty_app_returns_zero(self, db_with_reviews, monkeypatch):
@@ -145,7 +145,7 @@ class TestAgreementRate:
 
         from src.db.queries import agreement_rate
 
-        result = agreement_rate.__wrapped__("com.nonexistent")
+        result = agreement_rate("com.nonexistent")
         assert result["total"] == 0
         assert result["rate"] == 0.0
 

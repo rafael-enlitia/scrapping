@@ -1,5 +1,9 @@
 """Pydantic models for LLM classification output."""
 
+from __future__ import annotations
+
+from typing import Optional
+
 from pydantic import BaseModel, field_validator
 
 from src.llm.taxonomy import SENTIMENT_VALUES, TOPIC_VALUES
@@ -47,18 +51,22 @@ SENTIMENT_ALIASES: dict[str, str] = {
     "mix": "mixed",
 }
 
+_VALID_TOPICS = frozenset(TOPIC_VALUES)
+_VALID_SENTIMENTS = frozenset(SENTIMENT_VALUES)
+
 
 class ReviewClassification(BaseModel):
     sentiment: str
     topics: list[str]
     justification: str
+    confidence: Optional[float] = None
 
     @field_validator("sentiment")
     @classmethod
     def validate_sentiment(cls, v: str) -> str:
         v = v.lower().strip()
         v = SENTIMENT_ALIASES.get(v, v)
-        if v not in SENTIMENT_VALUES:
+        if v not in _VALID_SENTIMENTS:
             raise ValueError(f"Invalid sentiment '{v}'. Must be one of {SENTIMENT_VALUES}")
         return v
 
@@ -69,8 +77,15 @@ class ReviewClassification(BaseModel):
         for t in v:
             t = t.lower().strip()
             t = TOPIC_ALIASES.get(t, t)
-            if t not in TOPIC_VALUES:
+            if t not in _VALID_TOPICS:
                 raise ValueError(f"Invalid topic '{t}'. Must be one of {TOPIC_VALUES}")
             if t not in cleaned:
                 cleaned.append(t)
         return cleaned
+
+    @field_validator("confidence")
+    @classmethod
+    def validate_confidence(cls, v: float | None) -> float | None:
+        if v is None:
+            return None
+        return max(0.0, min(1.0, float(v)))

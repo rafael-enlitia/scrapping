@@ -11,21 +11,7 @@ import plotly.express as px
 import streamlit as st
 from wordcloud import WordCloud
 
-from src.db.queries import (
-    agreement_matrix,
-    agreement_rate,
-    avg_score_by_version,
-    comparison_reviews_df,
-    get_app_ids,
-    get_reviews_df,
-    get_versions,
-    lda_topic_distribution,
-    sentiment_by_version,
-    sentiment_comparison,
-    sentiment_over_time,
-    sentiment_vs_score,
-    topics_by_version,
-)
+import src.db.queries as _q
 from src.llm.taxonomy import SENTIMENT_VALUES, TOPIC_VALUES
 from src.nlp.preprocessing import tokenize_for_lda
 
@@ -43,32 +29,115 @@ SENTIMENT_COLORS = {
 
 SCORE_COLORS = {1: "#e74c3c", 2: "#e67e22", 3: "#f1c40f", 4: "#27ae60", 5: "#2ecc71"}
 
-METHOD_LABELS = {"llm": "LLM (GPT / Ollama)", "nlp": "NLP (BERT + LDA)"}
+METHOD_LABELS = {"llm": "LLM (GPT / Ollama / IAEDU)", "nlp": "NLP (BERT + LDA)"}
+
+
+# ---------------------------------------------------------------------------
+# Cached wrappers — caching lives here, not in queries.py
+# ---------------------------------------------------------------------------
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_app_ids() -> list[str]:
+    return _q.get_app_ids()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_versions(app_id: str) -> list[str]:
+    return _q.get_versions(app_id)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_reviews_df(app_id: str | None = None, method: str | None = None) -> pd.DataFrame:
+    return _q.get_reviews_df(app_id, method)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def sentiment_by_version(app_id: str, method: str | None = None) -> pd.DataFrame:
+    return _q.sentiment_by_version(app_id, method)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def topics_by_version(app_id: str, method: str | None = None) -> pd.DataFrame:
+    return _q.topics_by_version(app_id, method)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def avg_score_by_version(app_id: str) -> pd.DataFrame:
+    return _q.avg_score_by_version(app_id)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def sentiment_over_time(app_id: str, method: str | None = None) -> pd.DataFrame:
+    return _q.sentiment_over_time(app_id, method)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def sentiment_vs_score(app_id: str, method: str | None = None) -> pd.DataFrame:
+    return _q.sentiment_vs_score(app_id, method)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def sentiment_comparison(app_id: str) -> pd.DataFrame:
+    return _q.sentiment_comparison(app_id)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def agreement_matrix(app_id: str) -> pd.DataFrame:
+    return _q.agreement_matrix(app_id)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def agreement_rate(app_id: str) -> dict:
+    return _q.agreement_rate(app_id)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def comparison_reviews_df(app_id: str) -> pd.DataFrame:
+    return _q.comparison_reviews_df(app_id)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def lda_topic_distribution(app_id: str) -> pd.DataFrame:
+    return _q.lda_topic_distribution(app_id)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_embedding_clusters(app_id: str | None = None) -> pd.DataFrame | None:
+    return _q.get_embedding_clusters(app_id)
+
 
 # ---------------------------------------------------------------------------
 # Sidebar filters
 # ---------------------------------------------------------------------------
 st.sidebar.title("Filters")
+st.sidebar.subheader("Data")
 
 app_ids = get_app_ids()
 if not app_ids:
-    st.warning("No reviews in the database yet. Run the scraper first:")
-    st.code("python -m scripts.scrape --app-id com.whatsapp --count 500", language="bash")
+    st.warning("No reviews in the database yet.")
+    st.info("**Getting started:** Go to ⚙️ Pipeline Control in the sidebar, enter an App ID (e.g. `com.whatsapp`), then run Scrape → LLM Classify → NLP Classify in order.")
+    st.page_link("pages/pipeline_control.py", label="Go to Pipeline Control →", icon="⚙️")
     st.stop()
 
 selected_app = st.sidebar.selectbox("App", app_ids)
+st.session_state["shared_app_id"] = selected_app
+
+st.sidebar.subheader("Classification")
 
 # Method selector
 method_option = st.sidebar.radio(
     "Classification method",
     ["LLM", "NLP", "Both (comparison)"],
     index=0,
+    help="'Both' adds a Comparison tab with LLM vs NLP agreement metrics, side-by-side pies and disagreement samples.",
 )
 method_filter: str | None = None
 if method_option == "LLM":
     method_filter = "llm"
 elif method_option == "NLP":
     method_filter = "nlp"
+elif method_option == "Both (comparison)":
+    st.sidebar.caption("ℹ️ **Both** mode adds a Comparison tab. Charts use LLM sentiment where available, NLP otherwise.")
 
 versions = get_versions(selected_app)
 selected_versions = st.sidebar.multiselect("Versions", versions, default=versions)
@@ -76,8 +145,7 @@ selected_versions = st.sidebar.multiselect("Versions", versions, default=version
 # NLP cannot produce "mixed" — show only the sentiments that apply to the active method
 _nlp_sentiments = [s for s in SENTIMENT_VALUES if s != "mixed"]
 _sentiment_options = SENTIMENT_VALUES if method_filter != "nlp" else _nlp_sentiments
-_sentiment_defaults = _sentiment_options  # all selected by default
-selected_sentiments = st.sidebar.multiselect("Sentiments", _sentiment_options, default=_sentiment_defaults)
+selected_sentiments = st.sidebar.multiselect("Sentiments", _sentiment_options, default=list(_sentiment_options))
 
 selected_topics = st.sidebar.multiselect("Topics", TOPIC_VALUES, default=TOPIC_VALUES)
 if method_filter == "nlp":
@@ -106,7 +174,7 @@ else:
     date_range = None
 
 st.sidebar.divider()
-if st.sidebar.button("Clear cache & reload"):
+if st.sidebar.button("🔄 Clear cache & reload", help="Force-refresh all charts from the database (cache expires every 60 s automatically)"):
     st.cache_data.clear()
     st.rerun()
 
@@ -163,29 +231,28 @@ if method_filter == "nlp" and "mixed" in selected_sentiments:
     )
 
 classified_mask = df["sentiment"].notna()
+classified_count = int(classified_mask.sum())
 unclassified_count = int((~classified_mask).sum())
+total_count = len(df)
+pct_classified = classified_count / total_count if total_count else 0.0
 
 col1, col2, col3, col4, col5 = st.columns(5)
-col1.metric("Total reviews", len(df))
-col2.metric("Classified", int(classified_mask.sum()))
-col3.metric("Unclassified", unclassified_count, delta=f"-{unclassified_count}" if unclassified_count else None, delta_color="inverse")
+col1.metric("Total reviews", total_count)
+col2.metric("Classified", classified_count)
+col3.metric("Unclassified", unclassified_count)
 _avg_score = df["score"].mean()
 col4.metric("Avg rating", f"{_avg_score:.1f}" if pd.notna(_avg_score) else "—")
 col5.metric("Versions", df["app_version"].nunique())
 
-if unclassified_count > 0:
-    if method_filter == "nlp":
-        st.info(f"{unclassified_count} reviews pending NLP classification. Run: `python -m scripts.classify_nlp --limit {unclassified_count}`")
-    elif method_filter == "llm":
-        st.info(f"{unclassified_count} reviews pending LLM classification. Run: `python -m scripts.classify --limit {unclassified_count}`")
-    else:
-        st.info(f"{unclassified_count} reviews pending. Run both classifiers to compare.")
+if total_count > 0:
+    st.progress(
+        pct_classified,
+        text=f"{pct_classified:.0%} classified ({classified_count} of {total_count} reviews)",
+    )
 
-# ---------------------------------------------------------------------------
-# CSV Export
-# ---------------------------------------------------------------------------
-csv_data = df.drop(columns=["topics"], errors="ignore").rename(columns={"topics_list": "topics"}).to_csv(index=False)
-st.download_button("Export CSV", csv_data, f"{selected_app}_reviews.csv", "text/csv", width="content")
+if unclassified_count > 0:
+    st.info(f"{unclassified_count} reviews still need **{method_badge}** classification.")
+    st.page_link("pages/pipeline_control.py", label="Go to Pipeline Control to classify them", icon="⚙️")
 
 # ---------------------------------------------------------------------------
 # Tabs
@@ -220,6 +287,8 @@ with tabs[tab_idx["Sentiment"]]:
         if not sv.empty:
             if selected_versions and len(selected_versions) < len(versions):
                 sv = sv[sv["version"].isin(selected_versions)]
+            if selected_sentiments:
+                sv = sv[sv["sentiment"].isin(selected_sentiments)]
             if not sv.empty:
                 fig = px.bar(
                     sv,
@@ -234,34 +303,31 @@ with tabs[tab_idx["Sentiment"]]:
 
 # -- Topics tab -------------------------------------------------------------
 with tabs[tab_idx["Topics"]]:
-    # Compute all_topics once here — used by frequency, co-occurrence and word cloud
     all_topics: list[str] = [t for topics in df["topics_list"] for t in topics]
 
     if method_filter == "nlp":
         st.subheader("LDA-discovered topics")
         lda_dist = lda_topic_distribution(selected_app)
 
-        # Apply the active version filter to the LDA distribution
         if not lda_dist.empty and selected_versions and len(selected_versions) < len(versions):
-            # lda_topic_distribution doesn't carry version info — use df to derive
-            # the set of lda_topic_ids that appear in the filtered reviews
             visible_lda_ids = df["lda_topic_id"].dropna().unique().tolist()
             lda_dist = lda_dist[lda_dist["topic_id"].isin(visible_lda_ids)]
 
         if not lda_dist.empty:
-            # Recompute counts from the filtered df so they match other charts
             if selected_versions and len(selected_versions) < len(versions):
                 id_counts = df["lda_topic_id"].value_counts().rename_axis("topic_id").reset_index(name="count")
                 lda_dist = lda_dist.drop(columns=["count"], errors="ignore").merge(id_counts, on="topic_id", how="inner")
 
             for _, row in lda_dist.iterrows():
                 st.markdown(f"**Topic {int(row['topic_id'])}** ({int(row['count'])} reviews): _{row['topic_words']}_")
-            fig = px.bar(lda_dist, x="topic_id", y="count", text="count")
-            fig.update_layout(
-                xaxis_title="LDA Topic ID",
-                yaxis_title="Reviews",
-                margin=dict(t=20, b=20),
+            # Use top-3 keywords as x-axis tick labels so bars are self-explanatory
+            lda_dist = lda_dist.copy()
+            lda_dist["label"] = lda_dist.apply(
+                lambda r: ", ".join(str(r["topic_words"]).split(", ")[:3]) if pd.notna(r["topic_words"]) else f"T{int(r['topic_id'])}",
+                axis=1,
             )
+            fig = px.bar(lda_dist, x="label", y="count", text="count", hover_data={"topic_words": True, "topic_id": True})
+            fig.update_layout(xaxis_title="Topic keywords", yaxis_title="Reviews", xaxis_tickangle=-30, margin=dict(t=20, b=60))
             st.plotly_chart(fig, width="stretch")
             if selected_versions and len(selected_versions) < len(versions):
                 st.caption("ℹ️ Counts reflect the active version filter.")
@@ -290,7 +356,6 @@ with tabs[tab_idx["Topics"]]:
 
     with c2:
         st.subheader("Topics by version")
-        # Filter topics_by_version to respect the active version filter
         tv = topics_by_version(selected_app, method=method_filter)
         if not tv.empty:
             if selected_versions and len(selected_versions) < len(versions):
@@ -320,8 +385,9 @@ with tabs[tab_idx["Topics"]]:
         st.info("No topic data available.")
 
     st.subheader("Word Cloud")
-    # Use preprocessed tokens (stopwords removed, stemmed) for a meaningful cloud
-    _wc_lang = "portuguese" if not method_filter or method_filter in ("llm", "nlp") else "portuguese"
+    # Use the scrape language if stored on reviews, otherwise default to portuguese
+    _review_langs = df["language"].dropna().unique().tolist() if "language" in df.columns else []
+    _wc_lang = _review_langs[0] if len(_review_langs) == 1 else "portuguese"
     _wc_tokens: list[str] = []
     for text in df["content"].dropna():
         _wc_tokens.extend(tokenize_for_lda(str(text), language=_wc_lang))
@@ -367,15 +433,19 @@ with tabs[tab_idx["Evolution"]]:
         st.subheader("Sentiment over time (weekly)")
         sot = sentiment_over_time(selected_app, method=method_filter)
         if not sot.empty:
-            fig = px.area(
-                sot,
-                x="week",
-                y="count",
-                color="sentiment",
-                color_discrete_map=SENTIMENT_COLORS,
-            )
-            fig.update_layout(xaxis_tickangle=-45, margin=dict(t=20, b=20))
-            st.plotly_chart(fig, width="stretch")
+            # Apply sentiment filter
+            if selected_sentiments:
+                sot = sot[sot["sentiment"].isin(selected_sentiments)]
+            if not sot.empty:
+                fig = px.area(
+                    sot,
+                    x="week",
+                    y="count",
+                    color="sentiment",
+                    color_discrete_map=SENTIMENT_COLORS,
+                )
+                fig.update_layout(xaxis_tickangle=-45, margin=dict(t=20, b=20))
+                st.plotly_chart(fig, width="stretch")
 
 # -- Comparison tab (only when "Both" is selected) -------------------------
 if "Comparison" in tab_idx:
@@ -393,7 +463,6 @@ if "Comparison" in tab_idx:
         else:
             c1, c2 = st.columns(2)
 
-            # Side-by-side pie charts
             sc = sentiment_comparison(selected_app)
             with c1:
                 st.markdown("**LLM sentiment**")
@@ -411,7 +480,6 @@ if "Comparison" in tab_idx:
                     fig.update_layout(margin=dict(t=20, b=20))
                     st.plotly_chart(fig, width="stretch")
 
-            # Agreement matrix
             st.subheader("Agreement matrix (LLM vs NLP)")
             am = agreement_matrix(selected_app)
             if not am.empty:
@@ -426,7 +494,6 @@ if "Comparison" in tab_idx:
                 fig.update_layout(margin=dict(t=20, b=20))
                 st.plotly_chart(fig, width="stretch")
 
-            # Topic comparison
             st.subheader("Topic distribution comparison")
             tc1, tc2 = st.columns(2)
             with tc1:
@@ -440,19 +507,26 @@ if "Comparison" in tab_idx:
 
             with tc2:
                 st.markdown("**NLP topics (LDA-discovered)**")
-                lda_dist = lda_topic_distribution(selected_app)
-                if not lda_dist.empty:
-                    fig = px.bar(lda_dist, x="topic_id", y="count", text="topic_words")
-                    fig.update_layout(xaxis_title="LDA Topic ID", margin=dict(t=20, b=20))
+                lda_dist_cmp = lda_topic_distribution(selected_app)
+                if not lda_dist_cmp.empty:
+                    lda_dist_cmp = lda_dist_cmp.copy()
+                    lda_dist_cmp["label"] = lda_dist_cmp.apply(
+                        lambda r: ", ".join(str(r["topic_words"]).split(", ")[:3]) if pd.notna(r["topic_words"]) else f"T{int(r['topic_id'])}",
+                        axis=1,
+                    )
+                    fig = px.bar(lda_dist_cmp, x="label", y="count", hover_data={"topic_words": True})
+                    fig.update_layout(xaxis_title="Topic keywords", xaxis_tickangle=-30, margin=dict(t=20, b=60))
                     st.plotly_chart(fig, width="stretch")
 
-            # Disagreement samples
             st.subheader("Sample disagreements")
             comp_df = comparison_reviews_df(selected_app)
             disagree_df = comp_df[comp_df["llm_sentiment"] != comp_df["nlp_sentiment"]]
             for _, row in disagree_df.head(20).iterrows():
-                stars = "⭐" * int(row["score"]) if pd.notna(row["score"]) else ""
-                header = f"{stars} LLM: **{row['llm_sentiment']}** | NLP: **{row['nlp_sentiment']}** (conf {row.get('nlp_confidence', '—')})"
+                score_val = row["score"]
+                stars = "⭐" * int(score_val) if pd.notna(score_val) and 1 <= int(score_val) <= 5 else ""
+                llm_conf = f" (conf {row.get('llm_confidence', '—')})" if pd.notna(row.get("llm_confidence")) else ""
+                nlp_conf = f" (conf {row.get('nlp_confidence', '—')})" if pd.notna(row.get("nlp_confidence")) else ""
+                header = f"{stars} LLM: **{row['llm_sentiment']}**{llm_conf} | NLP: **{row['nlp_sentiment']}**{nlp_conf}"
                 with st.expander(header, expanded=False):
                     st.write(row["content"])
                     if pd.notna(row.get("llm_justification")):
@@ -481,36 +555,69 @@ with tabs[tab_idx["Score Analysis"]]:
         st.subheader("Sentiment vs Star Rating")
         svs = sentiment_vs_score(selected_app, method=method_filter)
         if not svs.empty:
-            pivot = svs.pivot_table(index="score", columns="sentiment", values="count", fill_value=0)
-            fig = px.imshow(
-                pivot,
-                labels=dict(x="Sentiment", y="Stars", color="Count"),
-                color_continuous_scale="YlOrRd",
-                aspect="auto",
-            )
-            fig.update_layout(margin=dict(t=20, b=20))
-            st.plotly_chart(fig, width="stretch")
+            # Apply sentiment filter
+            if selected_sentiments:
+                svs = svs[svs["sentiment"].isin(selected_sentiments)]
+            if not svs.empty:
+                pivot = svs.pivot_table(index="score", columns="sentiment", values="count", fill_value=0)
+                fig = px.imshow(
+                    pivot,
+                    labels=dict(x="Sentiment", y="Stars", color="Count"),
+                    color_continuous_scale="YlOrRd",
+                    aspect="auto",
+                )
+                fig.update_layout(margin=dict(t=20, b=20))
+                st.plotly_chart(fig, width="stretch")
 
 # -- Reviews tab ------------------------------------------------------------
 with tabs[tab_idx["Reviews"]]:
     st.subheader("Review details")
 
-    search_query = st.text_input("Search reviews", placeholder="Type to filter by content...")
+    rc1, rc2, rc3 = st.columns([3, 2, 1])
+    with rc1:
+        search_query = st.text_input("Search reviews", placeholder="Type to filter by content...", label_visibility="collapsed")
+    with rc2:
+        sort_by = st.selectbox(
+            "Sort by",
+            ["Date (newest)", "Date (oldest)", "Score (high→low)", "Score (low→high)", "Sentiment"],
+            label_visibility="collapsed",
+        )
+    with rc3:
+        csv_data = df.drop(columns=["topics"], errors="ignore").rename(columns={"topics_list": "topics"}).to_csv(index=False)
+        st.download_button("⬇ CSV", csv_data, f"{selected_app}_reviews.csv", "text/csv", use_container_width=True)
 
     display_df = df.copy()
     if search_query:
         display_df = display_df[display_df["content"].str.contains(search_query, case=False, na=False, regex=False)]
 
-    st.caption(f"Showing {len(display_df)} reviews")
+    _sort_map = {
+        "Date (newest)": ("review_date", False),
+        "Date (oldest)": ("review_date", True),
+        "Score (high→low)": ("score", False),
+        "Score (low→high)": ("score", True),
+        "Sentiment": ("sentiment", True),
+    }
+    _sort_col, _sort_asc = _sort_map[sort_by]
+    if _sort_col in display_df.columns:
+        display_df = display_df.sort_values(_sort_col, ascending=_sort_asc, na_position="last")
 
-    # If in comparison mode, load side-by-side data
+    total_display = len(display_df)
+    page_size = 20
+    total_pages = max(1, (total_display - 1) // page_size + 1)
+    page = st.number_input("Page", min_value=1, max_value=total_pages, value=1, step=1)
+    start_idx = (page - 1) * page_size
+    page_df = display_df.iloc[start_idx : start_idx + page_size]
+
+    st.caption(f"Page {page}/{total_pages} — {total_display} reviews match filters")
+
     comp_data: dict = {}
     if method_option == "Both (comparison)":
         comp_full = comparison_reviews_df(selected_app)
         comp_data = {row["review_id"]: row for _, row in comp_full.iterrows()}
 
-    for _, row in display_df.head(100).iterrows():
-        score_stars = "⭐" * int(row["score"]) if pd.notna(row["score"]) else ""
+    for _, row in page_df.iterrows():
+        score_val = row["score"]
+        score_stars = "⭐" * int(score_val) if pd.notna(score_val) and 1 <= int(score_val) <= 5 else ""
         sentiment_badge = row["sentiment"] if pd.notna(row["sentiment"]) else "unclassified"
         version_text = row["app_version"] if pd.notna(row["app_version"]) else "unknown"
         date_text = row["review_date"].strftime("%Y-%m-%d") if pd.notna(row["review_date"]) else ""
@@ -523,16 +630,20 @@ with tabs[tab_idx["Reviews"]]:
                 cr = comp_data[row["review_id"]]
                 bc1, bc2 = st.columns(2)
                 with bc1:
-                    st.markdown(f"**LLM:** {cr['llm_sentiment']}")
+                    llm_conf = f" (conf {cr['llm_confidence']:.2f})" if pd.notna(cr.get("llm_confidence")) else ""
+                    st.markdown(f"**LLM:** {cr['llm_sentiment']}{llm_conf}")
                     if pd.notna(cr.get("llm_justification")):
                         st.caption(cr["llm_justification"])
                 with bc2:
-                    st.markdown(f"**NLP:** {cr['nlp_sentiment']} (conf {cr.get('nlp_confidence', '—')})")
+                    nlp_conf = f" (conf {cr['nlp_confidence']:.2f})" if pd.notna(cr.get("nlp_confidence")) else ""
+                    st.markdown(f"**NLP:** {cr['nlp_sentiment']}{nlp_conf}")
                     if pd.notna(cr.get("lda_topic_words")):
                         st.caption(f"LDA: {cr['lda_topic_words']}")
             else:
                 if pd.notna(row.get("justification")):
                     st.caption(f"**LLM justification:** {row['justification']}")
+                if pd.notna(row.get("confidence")):
+                    st.caption(f"**Confidence:** {row['confidence']:.2f}")
                 if pd.notna(row.get("lda_topic_words")):
                     st.caption(f"**LDA topic:** {row['lda_topic_words']}")
 
@@ -541,6 +652,3 @@ with tabs[tab_idx["Reviews"]]:
                 st.caption(f"**Topics:** {', '.join(topics)}")
             if pd.notna(row.get("reply_content")):
                 st.caption(f"**Dev reply:** {row['reply_content']}")
-
-    if len(display_df) > 100:
-        st.info(f"Showing first 100 of {len(display_df)} reviews. Use the search filter to narrow down.")

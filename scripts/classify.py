@@ -9,11 +9,16 @@ def main():
     parser = argparse.ArgumentParser(description="Classify reviews with LLM")
     parser.add_argument("--limit", type=int, default=None, help="Max reviews to classify")
     parser.add_argument("--app-id", default=None, help="Filter by app package name")
-    parser.add_argument("--provider", default=None, choices=["openai", "ollama"], help="Override LLM provider")
+    parser.add_argument(
+        "--provider",
+        default=None,
+        choices=["openai", "ollama", "iaedu"],
+        help="Override LLM provider",
+    )
     parser.add_argument(
         "--retry-failed",
         action="store_true",
-        help="Only retry previously failed (unclassified) reviews",
+        help="Retry reviews that previously failed classification (have an error_msg in the DB)",
     )
     args = parser.parse_args()
 
@@ -29,7 +34,7 @@ def main():
         provider_name=args.provider,
         retry_failed=args.retry_failed,
     )
-    print(f"Done — {count} reviews classified.")
+    print(f"CLASSIFY_SUMMARY method=llm classified={count}")
 
 
 if __name__ == "__main__":

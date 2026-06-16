@@ -72,7 +72,11 @@ def tokenize_for_lda(text: str, language: str = "portuguese") -> list[str]:
     if language == "portuguese":
         stemmer = RSLPStemmer()
     else:
-        stemmer = SnowballStemmer(language)
+        try:
+            stemmer = SnowballStemmer(language)
+        except ValueError:
+            logger.warning("Unsupported stemmer language '%s', falling back to 'english'", language)
+            stemmer = SnowballStemmer("english")
 
     return [stemmer.stem(t) for t in tokens]
 
@@ -82,6 +86,33 @@ def preprocess_batch(
     language: str = "portuguese",
 ) -> tuple[list[str], list[str]]:
     """Return (cleaned_texts for BERT, joined_token_strings for LDA vectorizer)."""
-    cleaned = [clean_text(t) for t in texts]
-    lda_docs = [" ".join(tokenize_for_lda(t, language)) for t in texts]
+    _ensure_nltk()
+
+    # Build stemmer and stopwords once for the whole batch
+    try:
+        stop_words = set(stopwords.words(language))
+    except OSError:
+        stop_words = set(stopwords.words("english"))
+    stop_words |= set(stopwords.words("english"))
+
+    if language == "portuguese":
+        stemmer = RSLPStemmer()
+    else:
+        try:
+            stemmer = SnowballStemmer(language)
+        except ValueError:
+            logger.warning("Unsupported stemmer language '%s', falling back to 'english'", language)
+            stemmer = SnowballStemmer("english")
+
+    cleaned: list[str] = []
+    lda_docs: list[str] = []
+
+    for text in texts:
+        c = clean_text(text)
+        cleaned.append(c)
+
+        lower = _NON_ALPHA_RE.sub(" ", c.lower())
+        tokens = [t for t in lower.split() if t not in stop_words and len(t) > 2]
+        lda_docs.append(" ".join(stemmer.stem(t) for t in tokens))
+
     return cleaned, lda_docs

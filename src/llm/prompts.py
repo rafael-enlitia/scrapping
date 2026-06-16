@@ -14,6 +14,7 @@ Given a user review of a mobile application, you must:
 1. Classify the overall sentiment.
 2. Identify one or more topic categories.
 3. Provide a brief justification (1-2 sentences) for your classification.
+4. Provide a confidence score (0.0 to 1.0) reflecting how certain you are.
 
 STRICT RULES:
 - Use ONLY the exact sentiment and topic values listed below. Do NOT invent new values.
@@ -29,14 +30,16 @@ Output schema:
 {{
   "sentiment": "<one of: positive, negative, neutral, mixed>",
   "topics": ["<topic_value>"],
-  "justification": "<brief explanation without apostrophes>"
+  "justification": "<brief explanation without apostrophes>",
+  "confidence": <float between 0.0 and 1.0>
 }}
 
 Example:
 {{
   "sentiment": "negative",
   "topics": ["bugs", "performance"],
-  "justification": "The user reports frequent crashes and slow loading times after the latest update."
+  "justification": "The user reports frequent crashes and slow loading times after the latest update.",
+  "confidence": 0.92
 }}
 """.strip()
 

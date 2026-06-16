@@ -13,6 +13,8 @@ from src.nlp.topics import LDAModel
 
 logger = logging.getLogger(__name__)
 
+_BATCH_COMMIT_SIZE = 50
+
 
 def classify_batch_nlp(
     limit: int | None = None,
@@ -21,63 +23,73 @@ def classify_batch_nlp(
     retrain_lda: bool = False,
     language: str = "portuguese",
 ) -> int:
-    """Classify reviews with BERT + LDA and store results with method='nlp'."""
+    """Classify reviews with BERT + LDA and store results with method='nlp'.
+
+    Returns count of new successful classifications.
+    """
     init_db()
     session = get_session()
 
-    query = (
-        session.query(Review)
-        .outerjoin(
-            Classification,
-            (Review.review_id == Classification.review_id)
-            & (Classification.method == "nlp"),
+    try:
+        query = (
+            session.query(Review)
+            .outerjoin(
+                Classification,
+                (Review.review_id == Classification.review_id)
+                & (Classification.method == "nlp"),
+            )
+            .filter(Classification.id.is_(None))
         )
-        .filter(Classification.id.is_(None))
-    )
-    if app_id:
-        query = query.filter(Review.app_id == app_id)
-    query = query.order_by(Review.review_date.desc())
-    if limit:
-        query = query.limit(limit)
+        if app_id:
+            query = query.filter(Review.app_id == app_id)
+        query = query.order_by(Review.review_date.desc())
+        if limit:
+            query = query.limit(limit)
 
-    reviews = query.all()
-    total = len(reviews)
-    if total == 0:
-        logger.info("No unclassified-by-NLP reviews found.")
-        session.close()
-        return 0
+        reviews = query.all()
+        total = len(reviews)
+        if total == 0:
+            logger.info("No unclassified-by-NLP reviews found.")
+            return 0
 
-    logger.info("Found %d reviews to classify with NLP pipeline", total)
+        logger.info("Found %d reviews to classify with NLP pipeline", total)
+        logger.info("PROGRESS 0/%d", total)
 
-    texts = [r.content for r in reviews]
-    cleaned_texts, lda_docs = preprocess_batch(texts, language=language)
+        texts = [r.content for r in reviews]
+        cleaned_texts, lda_docs = preprocess_batch(texts, language=language)
 
-    # --- BERT sentiment ---
-    logger.info("Running BERT sentiment analysis...")
-    sentiment_results = predict_sentiment(cleaned_texts)
+        # BERT sentiment
+        logger.info("Running BERT sentiment analysis...")
+        sentiment_results = predict_sentiment(cleaned_texts)
+        logger.info("PROGRESS %d/%d", max(1, total // 4), total)
 
-    # --- LDA topics ---
-    lda = LDAModel(n_topics=num_topics)
-    loaded = lda.load()
+        # LDA topics — load or train
+        lda = LDAModel(n_topics=num_topics)
+        loaded = False if retrain_lda else lda.load(requested_n_topics=num_topics)
 
-    # Use ALL reviews for LDA corpus (not just the unclassified batch)
-    if not loaded or retrain_lda:
-        all_reviews = session.query(Review.content).all()
-        all_texts = [r[0] for r in all_reviews]
-        _, all_lda_docs = preprocess_batch(all_texts, language=language)
-        lda.fit(all_lda_docs)
-        lda.save()
-    else:
-        logger.info("Using existing LDA model.")
+        if not loaded:
+            logger.info("Training LDA model on full corpus…")
+            logger.info("PROGRESS %d/%d", max(1, total // 3), total)
+            all_reviews = session.query(Review.content).all()
+            all_texts = [r[0] for r in all_reviews]
+            _, all_lda_docs = preprocess_batch(all_texts, language=language)
+            lda.fit(all_lda_docs)
+            lda.save()
+            logger.info("PROGRESS %d/%d", max(1, total * 2 // 5), total)
+        else:
+            logger.info("Using existing LDA model.")
 
-    logger.info("Predicting LDA topics...")
-    topic_results = lda.predict(lda_docs)
+        logger.info("Predicting LDA topics...")
+        topic_results = lda.predict(lda_docs)
+        logger.info("PROGRESS %d/%d", max(1, total // 2), total)
 
-    # --- Store results ---
-    classified = 0
-    for review, sent, topic in zip(reviews, sentiment_results, topic_results):
-        try:
-            session.add(
+        # Store results in batches
+        classified = 0
+        batch: list[Classification] = []
+
+        for idx, (review, sent, topic) in enumerate(zip(reviews, sentiment_results, topic_results), 1):
+            now = datetime.now(timezone.utc)
+            batch.append(
                 Classification(
                     review_id=review.review_id,
                     method="nlp",
@@ -89,15 +101,36 @@ def classify_batch_nlp(
                     raw_response=None,
                     lda_topic_id=topic.topic_id,
                     lda_topic_words=topic.topic_words,
-                    classified_at=datetime.now(timezone.utc),
+                    classified_at=now,
                 )
             )
-            session.commit()
             classified += 1
-        except Exception as exc:
-            session.rollback()
-            logger.warning("Failed to store NLP classification for %s: %s", review.review_id, exc)
 
-    session.close()
+            if idx == total or idx % 10 == 0 or len(batch) >= _BATCH_COMMIT_SIZE:
+                logger.info("PROGRESS %d/%d", idx, total)
+
+            if len(batch) >= _BATCH_COMMIT_SIZE:
+                try:
+                    session.add_all(batch)
+                    session.commit()
+                    batch.clear()
+                except Exception as exc:
+                    session.rollback()
+                    logger.warning("Batch commit failed: %s", exc)
+                    classified -= len(batch)
+                    batch.clear()
+
+        if batch:
+            try:
+                session.add_all(batch)
+                session.commit()
+            except Exception as exc:
+                session.rollback()
+                logger.warning("Final batch commit failed: %s", exc)
+                classified -= len(batch)
+
+    finally:
+        session.close()
+
     logger.info("NLP pipeline done: %d / %d classified", classified, total)
     return classified

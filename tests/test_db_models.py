@@ -51,14 +51,14 @@ class TestReviewModel:
         session.rollback()
         session.close()
 
-    def test_review_requires_review_id(self, tmp_db):
+    def test_review_requires_content(self, tmp_db):
         _, Session = tmp_db
         from src.db.models import Review
 
         session = Session()
-        bad = Review(app_id="com.x", content="no id", score=1)
+        bad = Review(review_id="no-content-rev", app_id="com.x", score=1)
         session.add(bad)
-        with pytest.raises(Exception):
+        with pytest.raises(IntegrityError):
             session.commit()
         session.rollback()
         session.close()
@@ -120,3 +120,31 @@ class TestClassificationModel:
         assert clf is not None
         parsed = json.loads(clf.topics)
         assert isinstance(parsed, list)
+
+    def test_error_msg_and_failed_at_are_nullable(self, tmp_db):
+        _, Session = tmp_db
+        from src.db.models import Classification, Review
+
+        session = Session()
+        session.add(Review(
+            review_id="r-test",
+            app_id="com.x",
+            content="Test review",
+            score=3,
+        ))
+        session.flush()
+        clf = Classification(
+            review_id="r-test",
+            method="llm",
+            sentiment=None,
+            topics=None,
+            error_msg="Something went wrong",
+            failed_at=datetime.now(timezone.utc),
+        )
+        session.add(clf)
+        session.commit()
+
+        loaded = session.query(Classification).filter_by(review_id="r-test").first()
+        assert loaded.error_msg == "Something went wrong"
+        assert loaded.failed_at is not None
+        session.close()

@@ -5,6 +5,7 @@ __pycache__/
 data/*.db
 data/*.sqlite
 data/*.pkl
+data/*.npz
 data/*.html
 data/*.png
 data/gold.jsonl
@@ -12,3 +13,8 @@ data/gold.jsonl
 *.egg-info/
 dist/
 build/
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+.streamlit/secrets.toml

@@ -6,9 +6,9 @@ import logging
 from typing import NamedTuple
 
 import torch
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-from src.config import BERT_MODEL, NLP_BATCH_SIZE
+from src.config import NLP_BATCH_SIZE
+from src.nlp.model_manager import model_manager
 
 logger = logging.getLogger(__name__)
 
@@ -27,34 +27,18 @@ class SentimentResult(NamedTuple):
     star_prediction: int
 
 
-_tokenizer = None
-_model = None
-
-
-_device: torch.device | None = None
-
-
-def _load_model():
-    global _tokenizer, _model, _device
-    if _tokenizer is None:
-        logger.info("Loading BERT model: %s", BERT_MODEL)
-        _tokenizer = AutoTokenizer.from_pretrained(BERT_MODEL)
-        _model = AutoModelForSequenceClassification.from_pretrained(BERT_MODEL)
-        _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        _model.to(_device)
-        _model.eval()
-    return _tokenizer, _model, _device
-
-
 def predict_sentiment(texts: list[str], batch_size: int = NLP_BATCH_SIZE) -> list[SentimentResult]:
     """Run BERT sentiment on a list of cleaned texts. Returns one result per input."""
-    tokenizer, model, device = _load_model()
+    if not texts:
+        return []
+
+    tokenizer = model_manager.get_tokenizer()
+    model, device = model_manager.get_sentiment_model()
 
     results: list[SentimentResult] = []
 
     for i in range(0, len(texts), batch_size):
         batch = texts[i : i + batch_size]
-        # Truncate to model max length (512 tokens)
         inputs = tokenizer(
             batch,
             return_tensors="pt",
@@ -71,9 +55,11 @@ def predict_sentiment(texts: list[str], batch_size: int = NLP_BATCH_SIZE) -> lis
         confidences = probs.max(dim=-1).values
 
         for star, conf in zip(stars.cpu().tolist(), confidences.cpu().tolist()):
+            star = int(star)
+            sentiment = STAR_TO_SENTIMENT.get(star, "neutral")
             results.append(
                 SentimentResult(
-                    sentiment=STAR_TO_SENTIMENT[star],
+                    sentiment=sentiment,
                     confidence=round(conf, 4),
                     star_prediction=star,
                 )

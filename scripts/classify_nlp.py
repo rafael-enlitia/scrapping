@@ -27,7 +27,7 @@ def main():
         kwargs["num_topics"] = args.num_topics
 
     count = classify_batch_nlp(**kwargs)
-    print(f"Done — {count} reviews classified with NLP pipeline.")
+    print(f"CLASSIFY_SUMMARY method=nlp classified={count}")
 
 
 if __name__ == "__main__":

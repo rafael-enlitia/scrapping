@@ -14,6 +14,7 @@ Platform for sentiment analysis and topic discovery on mobile app reviews from t
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Configuration](#configuration)
+- [Starting the LLM (OpenAI GPT / Ollama)](#starting-the-llm-openai-gpt--ollama)
 - [Commands Reference](#commands-reference)
   - [Scrape reviews](#1-scrape-reviews)
   - [Classify with LLM](#2-classify-with-llm)
@@ -28,6 +29,7 @@ Platform for sentiment analysis and topic discovery on mobile app reviews from t
 - [Taxonomy](#taxonomy)
 - [Gold Label Format](#gold-label-format)
 - [Known Limitations](#known-limitations)
+- [Technical Guide](#technical-guide)
 
 ---
 
@@ -79,6 +81,98 @@ All settings are read from a `.env` file in the project root. Available variable
 | `DEFAULT_APP_ID` | `com.whatsapp` | Default app to scrape when `--app-id` is omitted |
 | `SCRAPE_LANG` | `pt` | Review language filter |
 | `SCRAPE_COUNTRY` | `pt` | Country store to scrape from |
+
+---
+
+## Starting the LLM (OpenAI GPT / Ollama)
+
+The **LLM pipeline** (`scripts/classify` and **Pipeline Control → LLM Classify**) needs either **OpenAI** (cloud, paid per request) or **Ollama** (local, free). Configure one option in `.env`, then classify reviews.
+
+### Option A — OpenAI (GPT)
+
+1. Create an API key at [platform.openai.com/api-keys](https://platform.openai.com/api-keys).
+2. Edit `.env`:
+
+```env
+LLM_PROVIDER=openai
+OPENAI_API_KEY=sk-your-key-here
+OPENAI_MODEL=gpt-4o-mini
+```
+
+3. Test from the project root (with venv active):
+
+```bash
+python -m scripts.classify --app-id com.whatsapp --limit 5
+```
+
+4. In the dashboard: **Pipeline Control → LLM Classify** → leave **Provider** as `(env default)` or choose **openai**.
+
+> Billing is per token. Use `--limit` while testing. `gpt-4o-mini` is the default balance of cost and quality.
+
+### Option B — Ollama (local)
+
+1. Install [Ollama](https://ollama.com) (macOS, Linux, or Windows).
+2. Start the server (if it is not already running):
+   - **macOS / Windows:** open the Ollama app, or run `ollama serve` in a terminal.
+   - **Linux:** `ollama serve` (often as a systemd service after install).
+3. Download a model (first time only):
+
+```bash
+ollama pull llama3
+```
+
+Other models work if you set `OLLAMA_MODEL` accordingly (e.g. `mistral`, `llama3.1`, `gemma2`).
+
+4. Check that the API responds:
+
+```bash
+curl http://localhost:11434/api/tags
+```
+
+5. Edit `.env`:
+
+```env
+LLM_PROVIDER=ollama
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=llama3
+```
+
+6. Test:
+
+```bash
+python -m scripts.classify --app-id com.whatsapp --provider ollama --limit 5
+```
+
+7. In the dashboard: **Pipeline Control → LLM Classify** → **Provider: ollama**.
+
+> Ollama must stay running while classifying. The first run may be slow until the model is loaded into memory.
+
+### Switching provider
+
+| Goal | Action |
+|------|--------|
+| Default provider | Set `LLM_PROVIDER` in `.env` |
+| One-off override | `python -m scripts.classify --provider openai` or `--provider ollama` |
+| UI override | **Pipeline Control** → **Provider** dropdown (overrides `.env` for that run only) |
+
+You do **not** need both configured at once — only the provider you use must be set up correctly.
+
+### Option C — IAEDU (agent-chat)
+
+For the **api.iaedu.pt** Chatbot API (FormData + `x-api-key` header):
+
+```env
+LLM_PROVIDER=iaedu
+IAEDU_API_KEY=sk-usr-...
+IAEDU_CHANNEL_ID=your-channel-id
+IAEDU_ENDPOINT=https://api.iaedu.pt/agent-chat/api/v1/agent/YOUR_AGENT_ID/stream
+```
+
+```bash
+python -m scripts.classify --app-id com.whatsapp --provider iaedu --limit 5
+```
+
+In the dashboard: **Pipeline Control → LLM Classify → Provider: iaedu**.
 
 ---
 
@@ -492,6 +586,12 @@ The gold dataset is a JSONL file (one JSON object per line):
 - `topics` is a list of zero or more topic keys from the taxonomy above
 
 See `data/gold_example.jsonl` for a sample.
+
+---
+
+## Technical Guide
+
+For full architecture, database schema, pipeline internals, algorithms, and extension points, see **[technical-guide.md](technical-guide.md)** (Portuguese). User-facing guides: [APP_GUIDE.md](APP_GUIDE.md) (PT), this README (commands & setup).
 
 ---
 

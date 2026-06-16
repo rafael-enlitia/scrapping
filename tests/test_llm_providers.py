@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
+
+# The shared backoff logic (including time.sleep) lives in base.py
+_BASE_SLEEP = "src.llm.providers.base.time.sleep"
 
 
 # --------------------------------------------------------------------------
@@ -41,7 +44,6 @@ class TestOpenAIProvider:
         success_response = MagicMock()
         success_response.choices[0].message.content = "ok"
 
-        # Fail twice, then succeed
         rate_err = RateLimitError.__new__(RateLimitError)
         mock_client.chat.completions.create.side_effect = [
             rate_err,
@@ -50,7 +52,7 @@ class TestOpenAIProvider:
         ]
 
         with patch("src.llm.providers.openai_client.OpenAI", return_value=mock_client):
-            with patch("src.llm.providers.openai_client.time.sleep"):
+            with patch(_BASE_SLEEP):
                 p = OpenAIProvider(api_key="k", model="m")
                 result = p.chat("sys", "usr")
 
@@ -59,19 +61,20 @@ class TestOpenAIProvider:
 
     def test_raises_after_max_retries(self):
         from openai import RateLimitError
-        from src.llm.providers.openai_client import _MAX_RETRIES, OpenAIProvider
+        from src.llm.providers.openai_client import OpenAIProvider
 
+        max_retries = 5  # matches the value passed to chat_with_backoff in openai_client
         mock_client = MagicMock()
         rate_err = RateLimitError.__new__(RateLimitError)
         mock_client.chat.completions.create.side_effect = rate_err
 
         with patch("src.llm.providers.openai_client.OpenAI", return_value=mock_client):
-            with patch("src.llm.providers.openai_client.time.sleep"):
+            with patch(_BASE_SLEEP):
                 p = OpenAIProvider(api_key="k", model="m")
                 with pytest.raises(RateLimitError):
                     p.chat("sys", "usr")
 
-        assert mock_client.chat.completions.create.call_count == _MAX_RETRIES
+        assert mock_client.chat.completions.create.call_count == max_retries
 
     def test_delay_doubles_on_each_retry(self):
         from openai import APITimeoutError
@@ -85,7 +88,7 @@ class TestOpenAIProvider:
 
         sleep_calls = []
         with patch("src.llm.providers.openai_client.OpenAI", return_value=mock_client):
-            with patch("src.llm.providers.openai_client.time.sleep", side_effect=lambda d: sleep_calls.append(d)):
+            with patch(_BASE_SLEEP, side_effect=lambda d: sleep_calls.append(d)):
                 p = OpenAIProvider(api_key="k", model="m")
                 p.chat("s", "u")
 
@@ -126,9 +129,17 @@ class TestOllamaProvider:
         mock_client.chat.completions.create.side_effect = [conn_err, success]
 
         with patch("src.llm.providers.ollama_client.OpenAI", return_value=mock_client):
-            with patch("src.llm.providers.ollama_client.time.sleep"):
+            with patch(_BASE_SLEEP):
                 p = OllamaProvider(model="llama3")
                 result = p.chat("s", "u")
 
         assert result == "ok"
         assert mock_client.chat.completions.create.call_count == 2
+
+    def test_url_normalization_no_double_v1(self):
+        """Base URL with /v1 suffix should not get a second /v1 appended."""
+        from src.llm.providers.ollama_client import _normalize_base_url
+
+        assert _normalize_base_url("http://localhost:11434") == "http://localhost:11434/v1"
+        assert _normalize_base_url("http://localhost:11434/v1") == "http://localhost:11434/v1"
+        assert _normalize_base_url("http://localhost:11434/v1/") == "http://localhost:11434/v1"

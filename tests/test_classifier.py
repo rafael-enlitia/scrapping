@@ -7,22 +7,20 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
+from sqlalchemy.exc import IntegrityError
 
 
 class TestClassifyReview:
     """Unit tests for the single-review classification helper."""
 
-    def _get_fn(self):
-        from src.llm.classifier import classify_review
-        return classify_review
-
     def test_returns_classification_schema(self, mock_llm_provider):
         from src.llm.classifier import classify_review
-        from src.llm.schemas import ClassificationResult
+        from src.llm.schemas import ReviewClassification
 
         result = classify_review(mock_llm_provider, "This app is great!")
-        assert isinstance(result, ClassificationResult)
-        assert result.sentiment in ("positive", "negative", "neutral")
+        assert isinstance(result, ReviewClassification)
+        assert result.sentiment in ("positive", "negative", "neutral", "mixed")
 
     def test_positive_review(self, mock_llm_provider):
         from src.llm.classifier import classify_review
@@ -36,9 +34,16 @@ class TestClassifyReview:
         result = classify_review(mock_llm_provider, "Great app!")
         assert isinstance(result.topics, list)
 
+    def test_confidence_returned(self, mock_llm_provider):
+        from src.llm.classifier import classify_review
+
+        result = classify_review(mock_llm_provider, "Great app!")
+        assert result.confidence is not None
+        assert 0.0 <= result.confidence <= 1.0
+
     def test_retries_on_invalid_json(self):
         from src.llm.classifier import classify_review
-        from src.llm.schemas import ClassificationResult
+        from src.llm.schemas import ReviewClassification
 
         provider = MagicMock()
         provider.model_name = "test-model"
@@ -54,7 +59,7 @@ class TestClassifyReview:
         ]
 
         result = classify_review(provider, "Buggy app", max_retries=2)
-        assert isinstance(result, ClassificationResult)
+        assert isinstance(result, ReviewClassification)
         assert result.sentiment == "negative"
 
     def test_raises_after_max_retries(self):
@@ -64,7 +69,7 @@ class TestClassifyReview:
         provider.model_name = "bad-model"
         provider.chat.return_value = "NOT JSON AT ALL"
 
-        with pytest.raises(Exception):
+        with pytest.raises((json.JSONDecodeError, ValidationError, ValueError)):
             classify_review(provider, "Any review", max_retries=2)
 
     def test_max_retries_must_be_at_least_one(self, mock_llm_provider):
@@ -72,6 +77,12 @@ class TestClassifyReview:
 
         with pytest.raises(ValueError, match="max_retries"):
             classify_review(mock_llm_provider, "text", max_retries=0)
+
+    def test_empty_text_raises(self, mock_llm_provider):
+        from src.llm.classifier import classify_review
+
+        with pytest.raises(ValueError):
+            classify_review(mock_llm_provider, "   ", max_retries=1)
 
 
 class TestClassifyBatch:
@@ -88,7 +99,7 @@ class TestClassifyBatch:
         mock_provider.model_name = "mock-model"
         mock_provider.chat.return_value = json.dumps({
             "sentiment": "positive",
-            "topics": ["ui"],
+            "topics": ["ui_ux"],
             "confidence": 0.9,
             "justification": "Good app.",
         })

@@ -74,13 +74,13 @@ def db_with_classifications(db_with_reviews):
     for i in range(20):
         rid = f"rev-{i:03d}"
         sentiment = "positive" if i % 2 == 0 else "negative"
-        # LLM classification
+        # LLM classification — topics use valid taxonomy values
         session.add(Classification(
             review_id=rid,
             method="llm",
             sentiment=sentiment,
             confidence=0.9,
-            topics=json.dumps(["performance", "ui"] if i % 3 == 0 else ["support"]),
+            topics=json.dumps(["performance", "ui_ux"] if i % 3 == 0 else ["customer_support"]),
             justification="Test justification",
             model_name="gpt-4o-mini",
             classified_at=datetime.now(timezone.utc),
@@ -109,7 +109,7 @@ def mock_llm_provider():
     provider.model_name = "mock-model"
     provider.chat.return_value = json.dumps({
         "sentiment": "positive",
-        "topics": ["performance", "ui"],
+        "topics": ["performance", "ui_ux"],
         "confidence": 0.95,
         "justification": "The review is very positive.",
     })
@@ -121,7 +121,7 @@ def gold_jsonl_path(tmp_path):
     """Write a small gold.jsonl file and return its path."""
     path = tmp_path / "gold.jsonl"
     entries = [
-        {"review_id": "rev-001", "sentiment": "positive", "topics": ["ui"]},
+        {"review_id": "rev-001", "sentiment": "positive", "topics": ["ui_ux"]},
         {"review_id": "rev-002", "sentiment": "negative", "topics": ["bugs"]},
         {"review_id": "rev-003", "sentiment": "neutral", "topics": []},
     ]

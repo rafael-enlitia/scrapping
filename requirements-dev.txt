@@ -1,0 +1,7 @@
+# Development and testing dependencies (not required for production)
+# Install with: pip install -r requirements.txt -r requirements-dev.txt
+pytest>=8.0.0
+pytest-mock>=3.14.0
+
+# Optional: save evaluation plots as PNG (may have install issues on Apple Silicon)
+kaleido>=0.2.1

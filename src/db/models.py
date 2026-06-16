@@ -15,6 +15,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     create_engine,
+    event,
 )
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -52,19 +53,28 @@ class Classification(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     review_id = Column(String, ForeignKey("reviews.review_id"), nullable=False, index=True)
     method = Column(String, nullable=False, default="llm")
-    sentiment = Column(String, nullable=False)
+    sentiment = Column(String, nullable=True)
     confidence = Column(Float, nullable=True)
-    topics = Column(JSON, nullable=False)
+    topics = Column(JSON, nullable=True)
     justification = Column(Text)
     model_name = Column(String)
     raw_response = Column(Text)
     lda_topic_id = Column(Integer, nullable=True)
     lda_topic_words = Column(String, nullable=True)
+    error_msg = Column(Text, nullable=True)
+    failed_at = Column(DateTime, nullable=True)
     classified_at = Column(DateTime, default=_utcnow)
 
 
 engine = create_engine(DATABASE_URL, echo=False)
 SessionLocal = sessionmaker(bind=engine)
+
+
+@event.listens_for(engine, "connect")
+def _set_sqlite_pragma(dbapi_connection, connection_record):
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
 
 
 def init_db():

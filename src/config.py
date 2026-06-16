@@ -30,6 +30,14 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 
+# IAEDU agent-chat (https://api.iaedu.pt)
+IAEDU_API_KEY = os.getenv("IAEDU_API_KEY", os.getenv("OPENAI_API_KEY", ""))
+IAEDU_CHANNEL_ID = os.getenv("IAEDU_CHANNEL_ID", "")
+IAEDU_ENDPOINT = os.getenv(
+    "IAEDU_ENDPOINT",
+    "https://api.iaedu.pt/agent-chat/api/v1/agent/cmor5objoex9gfp01vm7p95jh/stream",
+)
+
 # NLP pipeline (BERT + LDA)
 BERT_MODEL = os.getenv("BERT_MODEL", "nlptown/bert-base-multilingual-uncased-sentiment")
 LDA_NUM_TOPICS = _int_env("LDA_NUM_TOPICS", 8)

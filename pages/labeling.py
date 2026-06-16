@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
+from src.config import DATA_DIR
 from src.db.queries import get_app_ids, get_reviews_df
 from src.llm.taxonomy import SENTIMENT_VALUES, TOPIC_VALUES
 
-GOLD_PATH = Path("data/gold.jsonl")
+GOLD_PATH = DATA_DIR / "gold.jsonl"
 
 
 def load_gold() -> dict[str, dict]:
@@ -31,11 +31,23 @@ def load_gold() -> dict[str, dict]:
     return labels
 
 
-def save_gold(labels: dict[str, dict]):
+def save_gold(labels: dict[str, dict]) -> None:
+    """Rewrite full gold file (used for deletes and compaction)."""
     GOLD_PATH.parent.mkdir(exist_ok=True)
     with open(GOLD_PATH, "w") as f:
         for item in labels.values():
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+
+def save_gold_label(existing_labels: dict[str, dict], rid: str, item: dict) -> None:
+    """Save one label efficiently: append if new (fast), rewrite if update (necessary)."""
+    if rid not in existing_labels:
+        GOLD_PATH.parent.mkdir(exist_ok=True)
+        with open(GOLD_PATH, "a") as f:
+            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+    else:
+        existing_labels[rid] = item
+        save_gold(existing_labels)
 
 
 st.title("Review Labeling Tool")
@@ -46,7 +58,9 @@ if not app_ids:
     st.warning("No reviews in the database yet.")
     st.stop()
 
-selected_app = st.sidebar.selectbox("App", app_ids, key="label_app")
+_shared_app = st.session_state.get("shared_app_id", "")
+_default_app_idx = app_ids.index(_shared_app) if _shared_app in app_ids else 0
+selected_app = st.sidebar.selectbox("App", app_ids, index=_default_app_idx, key="label_app")
 show_only = st.sidebar.radio("Show", ["Classified (to verify)", "Unclassified", "All"])
 st.sidebar.divider()
 
@@ -57,6 +71,8 @@ df = get_reviews_df(selected_app)
 if df.empty:
     st.info("No reviews found.")
     st.stop()
+
+df["review_date"] = pd.to_datetime(df["review_date"], errors="coerce")
 
 # Deduplicate: when both LLM and NLP rows exist, prefer LLM for labeling reference
 df = df.sort_values("method", ascending=True, na_position="last")
@@ -71,10 +87,18 @@ if df.empty:
     st.info("No reviews match the selected filter.")
     st.stop()
 
-# Pagination
 page_size = 10
 total_pages = max(1, (len(df) - 1) // page_size + 1)
-page = st.sidebar.number_input("Page", min_value=1, max_value=total_pages, value=1)
+
+# Reset page to 1 whenever the app or filter changes
+filter_key = f"{selected_app}_{show_only}"
+if st.session_state.get("_label_filter_key") != filter_key:
+    st.session_state["_label_filter_key"] = filter_key
+    st.session_state["_label_page"] = 1
+
+page = st.sidebar.number_input("Page", min_value=1, max_value=total_pages, value=st.session_state.get("_label_page", 1), key="label_page_input")
+st.session_state["_label_page"] = page
+
 start = (page - 1) * page_size
 page_df = df.iloc[start : start + page_size]
 
@@ -85,11 +109,17 @@ for idx, row in page_df.iterrows():
     existing = gold_labels.get(rid, {})
     is_labeled = bool(existing)
 
-    stars = "⭐" * int(row["score"]) if pd.notna(row["score"]) else ""
-    badge = "✅ labeled" if is_labeled else ""
-    llm_sent = row["sentiment"] if pd.notna(row["sentiment"]) else "—"
+    score_val = row["score"]
+    stars = "⭐" * int(score_val) if pd.notna(score_val) and 1 <= int(score_val) <= 5 else "☆"
+    badge = "✅" if is_labeled else "🔲"
+    method_shown = row.get("method", "unknown")
+    pred_sent = row["sentiment"] if pd.notna(row["sentiment"]) else "—"
+    _content_preview = str(row.get("content", ""))[:80].replace("\n", " ")
+    _date_val = row.get("review_date")
+    _date_str = _date_val.strftime("%Y-%m-%d") if pd.notna(_date_val) else ""
 
-    with st.expander(f"{stars} {badge} | {rid[:12]}… | LLM: {llm_sent}", expanded=not is_labeled):
+    header = f"{badge} {stars}  {pred_sent}  |  {_date_str}  |  {_content_preview}…"
+    with st.expander(header, expanded=not is_labeled):
         st.write(row["content"])
 
         if pd.notna(row.get("justification")):
@@ -97,7 +127,7 @@ for idx, row in page_df.iterrows():
 
         col1, col2 = st.columns(2)
         with col1:
-            default_sent_idx = SENTIMENT_VALUES.index(existing["sentiment"]) if existing.get("sentiment") in SENTIMENT_VALUES else (SENTIMENT_VALUES.index(llm_sent) if llm_sent in SENTIMENT_VALUES else 0)
+            default_sent_idx = SENTIMENT_VALUES.index(existing["sentiment"]) if existing.get("sentiment") in SENTIMENT_VALUES else (SENTIMENT_VALUES.index(pred_sent) if pred_sent in SENTIMENT_VALUES else 0)
             human_sentiment = st.selectbox(
                 "Sentiment",
                 SENTIMENT_VALUES,
@@ -106,13 +136,13 @@ for idx, row in page_df.iterrows():
             )
 
         with col2:
-            llm_topics = []
+            pred_topics = []
             if pd.notna(row.get("topics")):
                 try:
-                    llm_topics = json.loads(row["topics"]) if isinstance(row["topics"], str) else row["topics"]
+                    pred_topics = json.loads(row["topics"]) if isinstance(row["topics"], str) else row["topics"]
                 except (json.JSONDecodeError, TypeError):
                     pass
-            default_topics = existing.get("topics", llm_topics)
+            default_topics = existing.get("topics", pred_topics)
             human_topics = st.multiselect(
                 "Topics",
                 TOPIC_VALUES,
@@ -120,12 +150,17 @@ for idx, row in page_df.iterrows():
                 key=f"topics_{rid}",
             )
 
-        if st.button("Save label", key=f"save_{rid}"):
-            gold_labels[rid] = {
-                "review_id": rid,
-                "sentiment": human_sentiment,
-                "topics": human_topics,
-            }
-            save_gold(gold_labels)
-            st.success(f"Saved label for {rid[:12]}…")
-            st.rerun()
+        btn_col1, btn_col2 = st.columns([1, 1])
+        with btn_col1:
+            if st.button("Save label", key=f"save_{rid}"):
+                new_item = {"review_id": rid, "sentiment": human_sentiment, "topics": human_topics}
+                save_gold_label(gold_labels, rid, new_item)
+                gold_labels[rid] = new_item
+                st.success(f"Saved label for {rid[:12]}…")
+                st.rerun()
+        with btn_col2:
+            if is_labeled and st.button("Delete label", key=f"del_{rid}"):
+                gold_labels.pop(rid, None)
+                save_gold(gold_labels)
+                st.warning(f"Deleted label for {rid[:12]}…")
+                st.rerun()

@@ -1,4 +1,7 @@
-"""Query helpers that power the dashboard and evaluation scripts."""
+"""Query helpers that power the dashboard and evaluation scripts.
+
+No Streamlit dependency here — caching is applied by callers (streamlit_app.py).
+"""
 
 from __future__ import annotations
 
@@ -6,7 +9,6 @@ import json
 from typing import Any
 
 import pandas as pd
-import streamlit as st
 from sqlalchemy import text
 
 from src.db.models import engine, init_db
@@ -46,7 +48,6 @@ def _method_clause(alias: str = "c") -> str:
 # Core data
 # ---------------------------------------------------------------------------
 
-@st.cache_data(ttl=60, show_spinner=False)
 def get_reviews_df(app_id: str | None = None, method: str | None = None) -> pd.DataFrame:
     """Return all reviews joined with their classification (if any).
 
@@ -124,7 +125,6 @@ def get_reviews_df(app_id: str | None = None, method: str | None = None) -> pd.D
     return df
 
 
-@st.cache_data(ttl=60, show_spinner=False)
 def get_app_ids() -> list[str]:
     """Return distinct app ids in the database."""
     _ensure_db()
@@ -133,7 +133,6 @@ def get_app_ids() -> list[str]:
     return [r[0] for r in rows]
 
 
-@st.cache_data(ttl=60, show_spinner=False)
 def get_versions(app_id: str) -> list[str]:
     """Return distinct app versions for a given app, ordered newest first (semver-aware)."""
     _ensure_db()
@@ -161,7 +160,6 @@ def get_versions(app_id: str) -> list[str]:
 # Per-method aggregations
 # ---------------------------------------------------------------------------
 
-@st.cache_data(ttl=60, show_spinner=False)
 def sentiment_by_version(app_id: str, method: str | None = None) -> pd.DataFrame:
     _ensure_db()
     if method is None:
@@ -192,6 +190,7 @@ def sentiment_by_version(app_id: str, method: str | None = None) -> pd.DataFrame
             JOIN classifications c ON r.review_id = c.review_id
             WHERE r.app_id = :app_id
               AND r.app_version IS NOT NULL
+              AND c.sentiment IS NOT NULL
               {_method_clause()}
             GROUP BY r.app_version, c.sentiment
             ORDER BY r.app_version
@@ -201,7 +200,6 @@ def sentiment_by_version(app_id: str, method: str | None = None) -> pd.DataFrame
         return pd.read_sql(query, conn, params=params)
 
 
-@st.cache_data(ttl=60, show_spinner=False)
 def topics_by_version(app_id: str, method: str | None = None) -> pd.DataFrame:
     _ensure_db()
     if method is None:
@@ -244,6 +242,7 @@ def topics_by_version(app_id: str, method: str | None = None) -> pd.DataFrame:
                  json_each(c.topics) je
             WHERE r.app_id = :app_id
               AND r.app_version IS NOT NULL
+              AND c.topics IS NOT NULL
               {_method_clause()}
             GROUP BY r.app_version, je.value
             ORDER BY r.app_version
@@ -253,7 +252,6 @@ def topics_by_version(app_id: str, method: str | None = None) -> pd.DataFrame:
         return pd.read_sql(query, conn, params=params)
 
 
-@st.cache_data(ttl=60, show_spinner=False)
 def avg_score_by_version(app_id: str) -> pd.DataFrame:
     _ensure_db()
     query = text("""
@@ -270,7 +268,6 @@ def avg_score_by_version(app_id: str) -> pd.DataFrame:
         return pd.read_sql(query, conn, params={"app_id": app_id})
 
 
-@st.cache_data(ttl=60, show_spinner=False)
 def sentiment_over_time(app_id: str, method: str | None = None) -> pd.DataFrame:
     _ensure_db()
     if method is None:
@@ -301,6 +298,7 @@ def sentiment_over_time(app_id: str, method: str | None = None) -> pd.DataFrame:
             JOIN classifications c ON r.review_id = c.review_id
             WHERE r.app_id = :app_id
               AND r.review_date IS NOT NULL
+              AND c.sentiment IS NOT NULL
               {_method_clause()}
             GROUP BY week, c.sentiment
             ORDER BY week
@@ -310,7 +308,6 @@ def sentiment_over_time(app_id: str, method: str | None = None) -> pd.DataFrame:
         return pd.read_sql(query, conn, params=params)
 
 
-@st.cache_data(ttl=60, show_spinner=False)
 def sentiment_vs_score(app_id: str, method: str | None = None) -> pd.DataFrame:
     _ensure_db()
     if method is None:
@@ -339,6 +336,7 @@ def sentiment_vs_score(app_id: str, method: str | None = None) -> pd.DataFrame:
             FROM reviews r
             JOIN classifications c ON r.review_id = c.review_id
             WHERE r.app_id = :app_id
+              AND c.sentiment IS NOT NULL
               {_method_clause()}
             GROUP BY r.score, c.sentiment
             ORDER BY r.score
@@ -352,7 +350,6 @@ def sentiment_vs_score(app_id: str, method: str | None = None) -> pd.DataFrame:
 # Comparison queries (LLM vs NLP)
 # ---------------------------------------------------------------------------
 
-@st.cache_data(ttl=60, show_spinner=False)
 def sentiment_comparison(app_id: str) -> pd.DataFrame:
     """Side-by-side sentiment counts for LLM vs NLP."""
     _ensure_db()
@@ -363,7 +360,7 @@ def sentiment_comparison(app_id: str) -> pd.DataFrame:
             COUNT(*) AS count
         FROM classifications c
         JOIN reviews r ON r.review_id = c.review_id
-        WHERE r.app_id = :app_id
+        WHERE r.app_id = :app_id AND c.sentiment IS NOT NULL
         GROUP BY c.method, c.sentiment
         ORDER BY c.method, c.sentiment
     """)
@@ -371,7 +368,6 @@ def sentiment_comparison(app_id: str) -> pd.DataFrame:
         return pd.read_sql(query, conn, params={"app_id": app_id})
 
 
-@st.cache_data(ttl=60, show_spinner=False)
 def agreement_matrix(app_id: str) -> pd.DataFrame:
     """Cross-tab of LLM sentiment vs NLP sentiment for reviews classified by both."""
     _ensure_db()
@@ -386,13 +382,14 @@ def agreement_matrix(app_id: str) -> pd.DataFrame:
             AND llm.method = 'llm' AND nlp.method = 'nlp'
         JOIN reviews r ON r.review_id = llm.review_id
         WHERE r.app_id = :app_id
+          AND llm.sentiment IS NOT NULL
+          AND nlp.sentiment IS NOT NULL
         GROUP BY llm.sentiment, nlp.sentiment
     """)
     with engine.connect() as conn:
         return pd.read_sql(query, conn, params={"app_id": app_id})
 
 
-@st.cache_data(ttl=60, show_spinner=False)
 def agreement_rate(app_id: str) -> dict:
     """Percentage of reviews where both methods agree on sentiment."""
     _ensure_db()
@@ -406,6 +403,8 @@ def agreement_rate(app_id: str) -> dict:
             AND llm.method = 'llm' AND nlp.method = 'nlp'
         JOIN reviews r ON r.review_id = llm.review_id
         WHERE r.app_id = :app_id
+          AND llm.sentiment IS NOT NULL
+          AND nlp.sentiment IS NOT NULL
     """)
     with engine.connect() as conn:
         row = conn.execute(query, {"app_id": app_id}).fetchone()
@@ -414,7 +413,6 @@ def agreement_rate(app_id: str) -> dict:
     return {"total": row[0], "agreed": row[1], "rate": round(row[1] / row[0] * 100, 1)}
 
 
-@st.cache_data(ttl=60, show_spinner=False)
 def comparison_reviews_df(app_id: str) -> pd.DataFrame:
     """Reviews with both LLM and NLP classifications side-by-side."""
     _ensure_db()
@@ -428,6 +426,7 @@ def comparison_reviews_df(app_id: str) -> pd.DataFrame:
             llm.sentiment AS llm_sentiment,
             llm.topics AS llm_topics,
             llm.justification AS llm_justification,
+            llm.confidence AS llm_confidence,
             nlp.sentiment AS nlp_sentiment,
             nlp.confidence AS nlp_confidence,
             nlp.topics AS nlp_topics,
@@ -439,22 +438,23 @@ def comparison_reviews_df(app_id: str) -> pd.DataFrame:
         JOIN classifications nlp
             ON r.review_id = nlp.review_id AND nlp.method = 'nlp'
         WHERE r.app_id = :app_id
+          AND llm.sentiment IS NOT NULL
+          AND nlp.sentiment IS NOT NULL
         ORDER BY r.review_date DESC
     """)
     with engine.connect() as conn:
         return pd.read_sql(query, conn, params={"app_id": app_id})
 
 
-@st.cache_data(ttl=300, show_spinner=False)
 def get_embedding_clusters(app_id: str | None = None) -> pd.DataFrame | None:
-    """Load pre-computed UMAP coordinates and cluster labels.
+    """Load pre-computed UMAP coordinates and cluster labels for the given app.
 
     Returns a DataFrame with columns: review_id, x, y, cluster.
-    Returns None if embeddings have not been computed yet.
+    Returns None if embeddings have not been computed yet for this app.
     """
     from src.nlp.embeddings import load_embeddings  # noqa: PLC0415
 
-    result = load_embeddings()
+    result = load_embeddings(app_id=app_id)
     if result is None:
         return None
 
@@ -465,20 +465,9 @@ def get_embedding_clusters(app_id: str | None = None) -> pd.DataFrame | None:
         "cluster": result.cluster_labels.astype(str),
     })
 
-    if app_id:
-        _ensure_db()
-        with engine.connect() as conn:
-            ids = pd.read_sql(
-                text("SELECT review_id FROM reviews WHERE app_id = :app_id"),
-                conn,
-                params={"app_id": app_id},
-            )
-        df = df[df["review_id"].isin(ids["review_id"])]
-
     return df if not df.empty else None
 
 
-@st.cache_data(ttl=60, show_spinner=False)
 def lda_topic_distribution(app_id: str) -> pd.DataFrame:
     """Count of reviews per LDA topic ID (for NLP method only)."""
     _ensure_db()

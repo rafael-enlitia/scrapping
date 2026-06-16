@@ -2,6 +2,8 @@
 
 Uma plataforma para analisar automaticamente as avaliações de aplicações móveis da Google Play Store, classificando o sentimento dos utilizadores e identificando os temas mais mencionados. Permite comparar dois métodos de análise diferentes lado a lado.
 
+> **Detalhes técnicos (arquitetura, BD, algoritmos):** ver [technical-guide.md](technical-guide.md).
+
 ---
 
 ## O que faz esta aplicação?
@@ -33,17 +35,110 @@ Abrir o ficheiro `.env` e preencher conforme necessário:
 
 | Variável | Para que serve |
 |----------|---------------|
-| `OPENAI_API_KEY` | Chave da API OpenAI (necessária para usar o pipeline LLM com GPT) |
-| `LLM_PROVIDER` | Escolher entre `openai` ou `ollama` (local, gratuito) |
+| `LLM_PROVIDER` | `openai` (GPT na nuvem) ou `ollama` (modelo local, gratuito) |
+| `OPENAI_API_KEY` | Chave da API OpenAI — obrigatória se `LLM_PROVIDER=openai` |
+| `OPENAI_MODEL` | Modelo OpenAI (ex.: `gpt-4o-mini`) |
+| `OLLAMA_BASE_URL` | URL do servidor Ollama (por omissão `http://localhost:11434`) |
+| `OLLAMA_MODEL` | Modelo Ollama (ex.: `llama3`) |
 | `DEFAULT_APP_ID` | ID da aplicação a analisar por omissão (ex: `com.whatsapp`) |
 | `SCRAPE_LANG` | Idioma das avaliações a recolher (ex: `pt` para português) |
 | `SCRAPE_COUNTRY` | País da loja a recolher (ex: `pt` para Portugal) |
 
-> Se não tiver chave OpenAI, pode usar **Ollama** gratuitamente com um modelo local como o `llama3`.
+> Só precisa de **uma** das opções LLM abaixo (GPT **ou** Ollama), não ambas.
+
+### 3. Iniciar o GPT (OpenAI) ou o Ollama
+
+#### Opção A — GPT (OpenAI)
+
+1. Criar uma chave em [platform.openai.com/api-keys](https://platform.openai.com/api-keys).
+2. No `.env`:
+
+```env
+LLM_PROVIDER=openai
+OPENAI_API_KEY=sk-a-sua-chave
+OPENAI_MODEL=gpt-4o-mini
+```
+
+3. Testar:
+
+```bash
+python -m scripts.classify --app-id com.whatsapp --limit 5
+```
+
+4. No dashboard: **⚙️ Pipeline Control → 🤖 LLM Classify** → Provider `(env default)` ou **openai**.
+
+O uso da API é pago por token. Use `--limit` para testes.
+
+#### Opção B — Ollama (local, gratuito)
+
+1. Instalar [Ollama](https://ollama.com).
+2. Arrancar o servidor:
+   - **macOS / Windows:** abrir a app Ollama, ou no terminal: `ollama serve`
+   - **Linux:** `ollama serve` (muitas instalações já arrancam o serviço automaticamente)
+3. Descarregar o modelo (só na primeira vez):
+
+```bash
+ollama pull llama3
+```
+
+4. Confirmar que responde:
+
+```bash
+curl http://localhost:11434/api/tags
+```
+
+5. No `.env`:
+
+```env
+LLM_PROVIDER=ollama
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=llama3
+```
+
+6. Testar:
+
+```bash
+python -m scripts.classify --app-id com.whatsapp --provider ollama --limit 5
+```
+
+7. No dashboard: **⚙️ Pipeline Control → 🤖 LLM Classify** → Provider **ollama**.
+
+O Ollama tem de estar a correr durante toda a classificação. A primeira execução pode demorar enquanto o modelo carrega na RAM.
+
+#### Opção C — IAEDU (agent-chat da escola)
+
+Para a API **api.iaedu.pt** (multipart + streaming):
+
+```env
+LLM_PROVIDER=iaedu
+IAEDU_API_KEY=sk-usr-...
+IAEDU_CHANNEL_ID=cmpyxvcx42ltml1012mfhvkkp
+IAEDU_ENDPOINT=https://api.iaedu.pt/agent-chat/api/v1/agent/SEU_AGENT_ID/stream
+```
+
+Testar:
+
+```bash
+python -m scripts.classify --app-id com.whatsapp --provider iaedu --limit 5
+```
+
+No dashboard: **Pipeline Control → LLM Classify → Provider: iaedu**.
+
+> O endpoint e o `channel_id` vêm do painel **Chatbot API Usage** da IAEDU. Cada review usa um `thread_id` novo automaticamente.
+
+#### Mudar de provider
+
+| Objetivo | Como |
+|----------|------|
+| Provider por omissão | `LLM_PROVIDER` no `.env` |
+| Só numa execução (terminal) | `--provider openai`, `ollama` ou `iaedu` |
+| Só numa execução (UI) | Dropdown **Provider** em Pipeline Control |
 
 ---
 
 ## Como usar — passo a passo
+
+> **Pré-requisito LLM:** se for classificar com o método A, configure e teste [GPT ou Ollama](#3-iniciar-o-gpt-openai-ou-o-ollama) antes deste passo.
 
 ### Passo 1 — Recolher avaliações
 
@@ -348,6 +443,8 @@ O relatório inclui: precisão global, F1 por classe, matriz de confusão, e com
 | NLP classifica 0 reviews | Correr `python -m scripts.migrate_db` para corrigir o esquema da base de dados |
 | Erro de API OpenAI (rate limit) | O sistema tenta automaticamente até 5 vezes com backoff exponencial; se falhar, aguardar e tentar novamente mais tarde |
 | Erro de API OpenAI (chave inválida) | Verificar a `OPENAI_API_KEY` no ficheiro `.env` |
+| Ollama: connection refused / timeout | Arrancar Ollama (`ollama serve` ou app), confirmar `curl http://localhost:11434/api/tags`, verificar `OLLAMA_BASE_URL` |
+| Ollama: model not found | Correr `ollama pull llama3` (ou o modelo definido em `OLLAMA_MODEL`) |
 | Dashboard não actualiza após classificar | Clicar em **"Clear cache & reload"** na barra lateral |
 | Primeiro uso NLP muito lento | Normal — está a descarregar o modelo BERT (~440 MB) pela primeira vez |
 | Embeddings demoram muito | Normal em CPU — ~30–60 s por 500 reviews. Usar `--limit` para testar primeiro com menos dados |

@@ -55,7 +55,6 @@ class LDAModel:
                 "Scrape more reviews before running the NLP pipeline."
             )
         logger.info("Fitting LDA with %d topics on %d documents", self.n_topics, len(documents))
-        # Use min_df=1 for tiny corpora to avoid an empty vocabulary
         min_df = 2 if len(documents) >= 50 else 1
         self.vectorizer = CountVectorizer(max_df=0.95, min_df=min_df, max_features=5000)
         dtm = self.vectorizer.fit_transform(documents)
@@ -78,6 +77,8 @@ class LDAModel:
         return self
 
     def save(self):
+        if self.vectorizer is None or self.lda is None:
+            raise RuntimeError("Cannot save: LDA model has not been fitted yet.")
         self.model_path.parent.mkdir(parents=True, exist_ok=True)
         joblib.dump(
             {"vectorizer": self.vectorizer, "lda": self.lda, "feature_names": self.feature_names, "n_topics": self.n_topics},
@@ -85,14 +86,33 @@ class LDAModel:
         )
         logger.info("LDA model saved to %s", self.model_path)
 
-    def load(self) -> bool:
+    def load(self, requested_n_topics: int | None = None) -> bool:
+        """Load a saved model. If the saved model's n_topics differs from requested, return False.
+
+        Pass ``requested_n_topics`` to detect mismatches; if None, skip the check.
+        """
         if not self.model_path.exists():
             return False
-        data = joblib.load(self.model_path)
+        try:
+            data = joblib.load(self.model_path)
+        except Exception as exc:
+            logger.warning("Failed to load LDA model from %s: %s", self.model_path, exc)
+            return False
+
+        saved_n_topics = data.get("n_topics", None)
+        if requested_n_topics is not None and saved_n_topics is not None:
+            if saved_n_topics != requested_n_topics:
+                logger.warning(
+                    "Saved LDA model has %d topics but %d were requested. "
+                    "Forcing retrain — use --retrain-lda to suppress this warning.",
+                    saved_n_topics, requested_n_topics,
+                )
+                return False
+
         self.vectorizer = data["vectorizer"]
         self.lda = data["lda"]
         self.feature_names = data["feature_names"]
-        self.n_topics = data["n_topics"]
+        self.n_topics = saved_n_topics or self.n_topics
         logger.info("LDA model loaded from %s (%d topics)", self.model_path, self.n_topics)
         return True
 
